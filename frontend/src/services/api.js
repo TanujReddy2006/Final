@@ -1,6 +1,11 @@
 import axios from 'axios';
 
-const rawApiUrl = (import.meta.env.VITE_API_URL || 'http://localhost:4000/api/v1').trim();
+const rawApiUrl = (
+  import.meta.env.VITE_API_URL ||
+  import.meta.env.API_URL ||
+  (typeof process !== 'undefined' && process.env?.API_URL) ||
+  'http://localhost:4000/api/v1'
+).trim();
 const cleanUrl = rawApiUrl.replace(/\/+$/, '');
 const baseURL = cleanUrl.endsWith('/api/v1') ? cleanUrl : `${cleanUrl}/api/v1`;
 
