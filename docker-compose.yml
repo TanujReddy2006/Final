@@ -1,0 +1,38 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: learnforge
+      POSTGRES_PASSWORD: learnforge
+      POSTGRES_DB: learnforge
+    ports: ["5432:5432"]
+    volumes: ["learnforge_pg:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U learnforge -d learnforge"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  backend:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql://learnforge:learnforge@postgres:5432/learnforge?schema=public
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: change-this-demo-secret
+      PORT: 4000
+      FRONTEND_URL: http://localhost:5173
+    ports: ["4000:4000"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+volumes:
+  learnforge_pg:
