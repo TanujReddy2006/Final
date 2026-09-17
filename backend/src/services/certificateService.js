@@ -7,7 +7,11 @@ import { db, id, now } from '../data.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const certificateDir = path.resolve(__dirname, '..', '..', 'storage', 'certificates');
-const publicBase = process.env.PUBLIC_BASE_URL || 'http://localhost:5173';
+const publicBase = (
+  process.env.PUBLIC_BASE_URL ||
+  (process.env.FRONTEND_URL ? process.env.FRONTEND_URL.split(',')[0].trim() : '') ||
+  'http://localhost:5173'
+).replace(/\/+$/, '');
 
 const pdfPath = certificateId => path.join(certificateDir, `${certificateId}.pdf`);
 
@@ -124,5 +128,32 @@ export async function issueCertificate({ user, course, score = 0 }) {
 }
 
 export async function readCertificatePdf(certificateId) {
-  return fs.readFile(pdfPath(certificateId));
+  try {
+    return await fs.readFile(pdfPath(certificateId));
+  } catch (error) {
+    // Self-healing: if file is not on disk (e.g. after container restart), regenerate it!
+    const query = String(certificateId || '').trim().toLowerCase();
+    const certificate = db.certificates.find(item => {
+      const certId = String(item.certificateId || '').trim().toLowerCase();
+      const certNum = String(item.certificateNumber || '').trim().toLowerCase();
+      const idVal = String(item.id || '').trim().toLowerCase();
+      return certId === query || certNum === query || idVal === query;
+    });
+
+    if (certificate) {
+      const course = db.courses.find(c => c.id === certificate.courseId) || {
+        title: certificate.courseName || certificate.certification || 'Certified Course'
+      };
+      const pdfBuffer = createCertificatePdf(certificate, course);
+      try {
+        await fs.mkdir(certificateDir, { recursive: true });
+        await fs.writeFile(pdfPath(certificate.certificateId), pdfBuffer);
+      } catch {
+        // Ignore file caching error on read-only/ephemeral storage
+      }
+      return pdfBuffer;
+    }
+
+    throw error;
+  }
 }

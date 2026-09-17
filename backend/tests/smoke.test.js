@@ -372,4 +372,50 @@ test('certificate verification supports both routes, case-insensitivity, and cer
   assert.equal(foundInHr.learnerName, 'Maya Chen');
 });
 
+test('deployment readiness: health checks, Vercel CORS, and self-healing PDF regeneration', async () => {
+  // 1. Health checks for Render
+  const healthzRes = await request(app).get('/healthz');
+  assert.equal(healthzRes.status, 200);
+  assert.equal(healthzRes.body.data.status, 'ok');
+
+  const healthRes = await request(app).get('/health');
+  assert.equal(healthRes.status, 200);
+  assert.equal(healthRes.body.data.status, 'ok');
+
+  // 2. Vercel domain CORS support
+  const corsRes = await request(app)
+    .get('/api/v1/health')
+    .set('Origin', 'https://learnforge-staging-123.vercel.app');
+  assert.equal(corsRes.status, 200);
+  assert.equal(corsRes.headers['access-control-allow-origin'], 'https://learnforge-staging-123.vercel.app');
+  assert.equal(corsRes.headers['access-control-allow-credentials'], 'true');
+
+  // 3. Self-healing PDF regeneration if file missing on disk
+  const { readCertificatePdf } = await import('../src/services/certificateService.js');
+  const fs = await import('node:fs/promises');
+  const path = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+
+  const testCert = db.certificates[0];
+  if (testCert) {
+    const __dirname = path.dirname(fileURLToPath(import.meta.url));
+    const targetPdfPath = path.resolve(__dirname, '..', 'storage', 'certificates', `${testCert.certificateId}.pdf`);
+
+    // Remove file from disk to simulate ephemeral container restart
+    try {
+      await fs.unlink(targetPdfPath);
+    } catch {
+      // ignore if already deleted
+    }
+
+    // readCertificatePdf should automatically regenerate it
+    const regeneratedBuffer = await readCertificatePdf(testCert.certificateId);
+    assert.ok(regeneratedBuffer);
+    assert.ok(Buffer.isBuffer(regeneratedBuffer));
+    assert.ok(regeneratedBuffer.length > 500);
+    assert.equal(regeneratedBuffer.slice(0, 4).toString(), '%PDF');
+  }
+});
+
+
 
