@@ -15,8 +15,10 @@ build/
 .env.production.local
 
 # Storage and logs
-storage/certificates/*.pdf
-storage/certificates/
+storage/
+backend/storage/
+**/storage/certificates/**
+*.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*

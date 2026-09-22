@@ -5,6 +5,273 @@ const { Pool } = pg;
 let pool;
 let enabled = false;
 
+const DDL_STATEMENTS = `
+  DROP TABLE IF EXISTS learnforge_state;
+
+  CREATE TABLE IF NOT EXISTS companies (
+    id VARCHAR(100) PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    description TEXT,
+    website VARCHAR(255),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+
+  CREATE TABLE IF NOT EXISTS users (
+    id VARCHAR(100) PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    email VARCHAR(255) UNIQUE NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    role VARCHAR(50) NOT NULL DEFAULT 'LEARNER',
+    company_id VARCHAR(100) REFERENCES companies(id) ON DELETE SET NULL,
+    active BOOLEAN NOT NULL DEFAULT true,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+
+  CREATE TABLE IF NOT EXISTS courses (
+    id VARCHAR(100) PRIMARY KEY,
+    title VARCHAR(255) NOT NULL,
+    description TEXT NOT NULL,
+    detailed_description TEXT,
+    thumbnail VARCHAR(500),
+    category VARCHAR(100),
+    difficulty VARCHAR(50),
+    duration VARCHAR(50),
+    instructor_name VARCHAR(255),
+    instructor_bio TEXT,
+    prerequisites TEXT,
+    learning_objectives JSONB DEFAULT '[]',
+    target_audience TEXT,
+    status VARCHAR(50) NOT NULL DEFAULT 'DRAFT',
+    company_id VARCHAR(100) NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+    modules JSONB NOT NULL DEFAULT '[]',
+    skills JSONB NOT NULL DEFAULT '[]',
+    assessment_id VARCHAR(100),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+
+  CREATE TABLE IF NOT EXISTS enrollments (
+    id VARCHAR(100) PRIMARY KEY,
+    user_id VARCHAR(100) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    course_id VARCHAR(100) NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+    progress INT NOT NULL DEFAULT 0,
+    status VARCHAR(50) NOT NULL DEFAULT 'IN_PROGRESS',
+    completed_modules JSONB NOT NULL DEFAULT '[]',
+    completed_lessons JSONB NOT NULL DEFAULT '[]',
+    started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at TIMESTAMPTZ,
+    UNIQUE(user_id, course_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS assessments (
+    id VARCHAR(100) PRIMARY KEY,
+    course_id VARCHAR(100) NOT NULL,
+    title VARCHAR(255) NOT NULL,
+    passing_score INT NOT NULL DEFAULT 70,
+    max_attempts INT NOT NULL DEFAULT 3,
+    questions JSONB NOT NULL DEFAULT '[]',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+
+  CREATE TABLE IF NOT EXISTS attempts (
+    id VARCHAR(100) PRIMARY KEY,
+    user_id VARCHAR(100) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    assessment_id VARCHAR(100) NOT NULL REFERENCES assessments(id) ON DELETE CASCADE,
+    score INT NOT NULL,
+    passed BOOLEAN NOT NULL,
+    answers JSONB DEFAULT '{}',
+    attempt_number INT NOT NULL DEFAULT 1,
+    submitted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+
+  CREATE TABLE IF NOT EXISTS certificates (
+    id VARCHAR(100) PRIMARY KEY,
+    certificate_id VARCHAR(100) UNIQUE NOT NULL,
+    certificate_number VARCHAR(100) UNIQUE NOT NULL,
+    learner_id VARCHAR(100) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    learner_name VARCHAR(255) NOT NULL,
+    course_id VARCHAR(100) NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+    course_name VARCHAR(255) NOT NULL,
+    certification VARCHAR(255) NOT NULL,
+    issued_by VARCHAR(255) NOT NULL,
+    score INT NOT NULL,
+    completion_date TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    issued_date TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expiry_date TIMESTAMPTZ,
+    verification_url VARCHAR(500) NOT NULL,
+    pdf_url VARCHAR(500) NOT NULL,
+    status VARCHAR(50) NOT NULL DEFAULT 'VALID',
+    skills JSONB NOT NULL DEFAULT '[]',
+    revocation JSONB
+  );
+
+  CREATE TABLE IF NOT EXISTS verifications (
+    id VARCHAR(100) PRIMARY KEY,
+    certificate_id VARCHAR(100) NOT NULL,
+    searched_query VARCHAR(255),
+    requested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    ip VARCHAR(100)
+  );
+
+  CREATE TABLE IF NOT EXISTS audit_logs (
+    id VARCHAR(100) PRIMARY KEY,
+    actor_id VARCHAR(100),
+    action VARCHAR(100) NOT NULL,
+    entity_type VARCHAR(100) NOT NULL,
+    entity_id VARCHAR(100) NOT NULL,
+    timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    status VARCHAR(50) NOT NULL DEFAULT 'SUCCESS',
+    metadata JSONB DEFAULT '{}',
+    ip VARCHAR(100)
+  );
+
+  CREATE TABLE IF NOT EXISTS notifications (
+    id VARCHAR(100) PRIMARY KEY,
+    user_id VARCHAR(100) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    title VARCHAR(255) NOT NULL,
+    body TEXT NOT NULL,
+    read BOOLEAN NOT NULL DEFAULT false,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+`;
+
+const parseJson = val => {
+  if (!val) return val;
+  if (typeof val === 'string') {
+    try {
+      return JSON.parse(val);
+    } catch {
+      return val;
+    }
+  }
+  return val;
+};
+
+const mapCompany = r => ({
+  id: r.id,
+  name: r.name,
+  description: r.description || '',
+  website: r.website || '',
+  createdAt: r.created_at
+});
+
+const mapUser = r => ({
+  id: r.id,
+  name: r.name,
+  email: r.email,
+  passwordHash: r.password_hash,
+  role: r.role,
+  companyId: r.company_id,
+  active: r.active,
+  createdAt: r.created_at
+});
+
+const mapCourse = r => ({
+  id: r.id,
+  title: r.title,
+  description: r.description,
+  detailedDescription: r.detailed_description,
+  thumbnail: r.thumbnail,
+  category: r.category,
+  difficulty: r.difficulty,
+  duration: r.duration,
+  instructorName: r.instructor_name,
+  instructorBio: r.instructor_bio,
+  prerequisites: r.prerequisites,
+  learningObjectives: parseJson(r.learning_objectives) || [],
+  targetAudience: r.target_audience,
+  status: r.status,
+  companyId: r.company_id,
+  modules: parseJson(r.modules) || [],
+  skills: parseJson(r.skills) || [],
+  assessmentId: r.assessment_id,
+  createdAt: r.created_at,
+  updatedAt: r.updated_at
+});
+
+const mapEnrollment = r => ({
+  id: r.id,
+  userId: r.user_id,
+  courseId: r.course_id,
+  progress: r.progress,
+  status: r.status,
+  completedModules: parseJson(r.completed_modules) || [],
+  completedLessons: parseJson(r.completed_lessons) || [],
+  startedAt: r.started_at,
+  completedAt: r.completed_at
+});
+
+const mapAssessment = r => ({
+  id: r.id,
+  courseId: r.course_id,
+  title: r.title,
+  passingScore: r.passing_score,
+  maxAttempts: r.max_attempts,
+  questions: parseJson(r.questions) || [],
+  createdAt: r.created_at
+});
+
+const mapAttempt = r => ({
+  id: r.id,
+  userId: r.user_id,
+  assessmentId: r.assessment_id,
+  score: r.score,
+  passed: r.passed,
+  answers: parseJson(r.answers) || {},
+  attemptNumber: r.attempt_number,
+  submittedAt: r.submitted_at
+});
+
+const mapCertificate = r => ({
+  id: r.id,
+  certificateId: r.certificate_id,
+  certificateNumber: r.certificate_number,
+  learnerId: r.learner_id,
+  learnerName: r.learner_name,
+  courseId: r.course_id,
+  courseName: r.course_name,
+  certification: r.certification,
+  issuedBy: r.issued_by,
+  score: r.score,
+  completionDate: r.completion_date,
+  issuedDate: r.issued_date,
+  expiryDate: r.expiry_date,
+  verificationUrl: r.verification_url,
+  pdfUrl: r.pdf_url,
+  status: r.status,
+  skills: parseJson(r.skills) || [],
+  revocation: parseJson(r.revocation) || null
+});
+
+const mapVerification = r => ({
+  id: r.id,
+  certificateId: r.certificate_id,
+  searchedQuery: r.searched_query,
+  requestedAt: r.requested_at,
+  ip: r.ip
+});
+
+const mapAuditLog = r => ({
+  id: r.id,
+  actorId: r.actor_id,
+  action: r.action,
+  entityType: r.entity_type,
+  entityId: r.entity_id,
+  timestamp: r.timestamp,
+  status: r.status,
+  metadata: parseJson(r.metadata) || {},
+  ip: r.ip
+});
+
+const mapNotification = r => ({
+  id: r.id,
+  userId: r.user_id,
+  title: r.title,
+  body: r.body,
+  read: r.read,
+  createdAt: r.created_at
+});
+
 export async function initDatabase() {
   const connectionString =
     process.env.DATABASE_URL ||
@@ -22,54 +289,255 @@ export async function initDatabase() {
       ssl: isCloudPostgres ? { rejectUnauthorized: false } : undefined
     });
 
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS learnforge_state (
-        id INTEGER PRIMARY KEY,
-        payload JSONB NOT NULL,
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )
-    `);
+    // Execute relational schema DDL
+    await pool.query(DDL_STATEMENTS);
 
-    const result = await pool.query('SELECT payload FROM learnforge_state WHERE id = 1');
-    if (result.rows[0]?.payload) {
-      const currentCatalogVersion = db.catalogVersion;
-      const saved = result.rows[0].payload;
-      Object.assign(db, saved);
-
-      if (saved.catalogVersion !== currentCatalogVersion) {
-        db.courses = [];
-        db.enrollments = [];
-        db.assessments = [];
-        db.attempts = [];
-        db.certificates = [];
-        db.notifications = [];
-        db.verifications = [];
-        db.catalogVersion = currentCatalogVersion;
-        await persistDatabase();
+    // Seed default companies and users if not already present
+    const userCountRes = await pool.query('SELECT COUNT(*) AS count FROM users');
+    if (parseInt(userCountRes.rows[0].count, 10) === 0) {
+      for (const comp of db.companies) {
+        await pool.query(
+          `INSERT INTO companies (id, name, description, website)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT (id) DO NOTHING`,
+          [comp.id, comp.name, comp.description || null, comp.website || null]
+        );
       }
-    } else {
-      await persistDatabase();
+
+      for (const usr of db.users) {
+        await pool.query(
+          `INSERT INTO users (id, name, email, password_hash, role, company_id, active)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)
+           ON CONFLICT (id) DO NOTHING`,
+          [usr.id, usr.name, usr.email, usr.passwordHash, usr.role, usr.companyId || null, usr.active ?? true]
+        );
+      }
     }
 
+    // Load persisted rows from all PostgreSQL tables into synchronized db state
+    const [comps, usrs, crss, enrls, asmts, atmts, crts, vrfs, adts, ntfs] = await Promise.all([
+      pool.query('SELECT * FROM companies ORDER BY created_at ASC'),
+      pool.query('SELECT * FROM users ORDER BY created_at ASC'),
+      pool.query('SELECT * FROM courses ORDER BY created_at ASC'),
+      pool.query('SELECT * FROM enrollments ORDER BY started_at ASC'),
+      pool.query('SELECT * FROM assessments ORDER BY created_at ASC'),
+      pool.query('SELECT * FROM attempts ORDER BY submitted_at ASC'),
+      pool.query('SELECT * FROM certificates ORDER BY issued_date ASC'),
+      pool.query('SELECT * FROM verifications ORDER BY requested_at ASC'),
+      pool.query('SELECT * FROM audit_logs ORDER BY timestamp ASC'),
+      pool.query('SELECT * FROM notifications ORDER BY created_at ASC')
+    ]);
+
+    if (comps.rows.length) db.companies = comps.rows.map(mapCompany);
+    if (usrs.rows.length) db.users = usrs.rows.map(mapUser);
+    if (crss.rows.length) db.courses = crss.rows.map(mapCourse);
+    if (enrls.rows.length) db.enrollments = enrls.rows.map(mapEnrollment);
+    if (asmts.rows.length) db.assessments = asmts.rows.map(mapAssessment);
+    if (atmts.rows.length) db.attempts = atmts.rows.map(mapAttempt);
+    if (crts.rows.length) db.certificates = crts.rows.map(mapCertificate);
+    if (vrfs.rows.length) db.verifications = vrfs.rows.map(mapVerification);
+    if (adts.rows.length) db.auditLogs = adts.rows.map(mapAuditLog);
+    if (ntfs.rows.length) db.notifications = ntfs.rows.map(mapNotification);
+
     enabled = true;
-    console.log('PostgreSQL persistence enabled');
+    console.log('PostgreSQL relational database initialized and synchronized');
   } catch (error) {
     console.warn(`PostgreSQL unavailable; using in-memory mode: ${error.message}`);
     await pool?.end().catch(() => {});
     pool = undefined;
+    enabled = false;
   }
 }
 
 export async function persistDatabase() {
-  if (!pool) return;
-  await pool.query(
-    `INSERT INTO learnforge_state (id, payload, updated_at)
-     VALUES (1, $1, NOW())
-     ON CONFLICT (id) DO UPDATE SET
-       payload = EXCLUDED.payload,
-       updated_at = NOW()`,
-    [JSON.stringify(db)]
-  );
+  if (!pool || !enabled) return;
+  try {
+    for (const c of db.companies) {
+      await pool.query(
+        `INSERT INTO companies (id, name, description, website)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (id) DO UPDATE SET
+           name = EXCLUDED.name,
+           description = EXCLUDED.description,
+           website = EXCLUDED.website`,
+        [c.id, c.name, c.description || null, c.website || null]
+      );
+    }
+
+    for (const u of db.users) {
+      await pool.query(
+        `INSERT INTO users (id, name, email, password_hash, role, company_id, active)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT (id) DO UPDATE SET
+           name = EXCLUDED.name,
+           email = EXCLUDED.email,
+           role = EXCLUDED.role,
+           active = EXCLUDED.active,
+           company_id = EXCLUDED.company_id`,
+        [u.id, u.name, u.email, u.passwordHash, u.role, u.companyId || null, u.active ?? true]
+      );
+    }
+
+    for (const c of db.courses) {
+      await pool.query(
+        `INSERT INTO courses (
+           id, title, description, detailed_description, thumbnail, category, difficulty, duration,
+           instructor_name, instructor_bio, prerequisites, learning_objectives, target_audience,
+           status, company_id, modules, skills, assessment_id
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+         ON CONFLICT (id) DO UPDATE SET
+           title = EXCLUDED.title,
+           description = EXCLUDED.description,
+           detailed_description = EXCLUDED.detailed_description,
+           thumbnail = EXCLUDED.thumbnail,
+           category = EXCLUDED.category,
+           difficulty = EXCLUDED.difficulty,
+           duration = EXCLUDED.duration,
+           instructor_name = EXCLUDED.instructor_name,
+           instructor_bio = EXCLUDED.instructor_bio,
+           prerequisites = EXCLUDED.prerequisites,
+           learning_objectives = EXCLUDED.learning_objectives,
+           target_audience = EXCLUDED.target_audience,
+           status = EXCLUDED.status,
+           modules = EXCLUDED.modules,
+           skills = EXCLUDED.skills,
+           assessment_id = EXCLUDED.assessment_id,
+           updated_at = NOW()`,
+        [
+          c.id,
+          c.title,
+          c.description,
+          c.detailedDescription || null,
+          c.thumbnail || null,
+          c.category || null,
+          c.difficulty || null,
+          c.duration || null,
+          c.instructorName || null,
+          c.instructorBio || null,
+          c.prerequisites || null,
+          JSON.stringify(c.learningObjectives || []),
+          c.targetAudience || null,
+          c.status || 'DRAFT',
+          c.companyId,
+          JSON.stringify(c.modules || []),
+          JSON.stringify(c.skills || []),
+          c.assessmentId || null
+        ]
+      );
+    }
+
+    for (const e of db.enrollments) {
+      await pool.query(
+        `INSERT INTO enrollments (id, user_id, course_id, progress, status, completed_modules, completed_lessons, started_at, completed_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         ON CONFLICT (id) DO UPDATE SET
+           progress = EXCLUDED.progress,
+           status = EXCLUDED.status,
+           completed_modules = EXCLUDED.completed_modules,
+           completed_lessons = EXCLUDED.completed_lessons,
+           completed_at = EXCLUDED.completed_at`,
+        [
+          e.id,
+          e.userId,
+          e.courseId,
+          e.progress || 0,
+          e.status || 'IN_PROGRESS',
+          JSON.stringify(e.completedModules || []),
+          JSON.stringify(e.completedLessons || []),
+          e.startedAt || new Date(),
+          e.completedAt || null
+        ]
+      );
+    }
+
+    for (const a of db.assessments) {
+      await pool.query(
+        `INSERT INTO assessments (id, course_id, title, passing_score, max_attempts, questions)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (id) DO UPDATE SET
+           title = EXCLUDED.title,
+           passing_score = EXCLUDED.passing_score,
+           max_attempts = EXCLUDED.max_attempts,
+           questions = EXCLUDED.questions`,
+        [a.id, a.courseId, a.title, a.passingScore || 70, a.maxAttempts || 3, JSON.stringify(a.questions || [])]
+      );
+    }
+
+    for (const at of db.attempts) {
+      await pool.query(
+        `INSERT INTO attempts (id, user_id, assessment_id, score, passed, answers, attempt_number, submitted_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         ON CONFLICT (id) DO NOTHING`,
+        [at.id, at.userId, at.assessmentId, at.score, at.passed, JSON.stringify(at.answers || {}), at.attemptNumber || 1, at.submittedAt || new Date()]
+      );
+    }
+
+    for (const cert of db.certificates) {
+      await pool.query(
+        `INSERT INTO certificates (
+           id, certificate_id, certificate_number, learner_id, learner_name, course_id, course_name,
+           certification, issued_by, score, completion_date, issued_date, expiry_date,
+           verification_url, pdf_url, status, skills, revocation
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+         ON CONFLICT (id) DO UPDATE SET
+           score = EXCLUDED.score,
+           status = EXCLUDED.status,
+           revocation = EXCLUDED.revocation`,
+        [
+          cert.id,
+          cert.certificateId,
+          cert.certificateNumber,
+          cert.learnerId,
+          cert.learnerName,
+          cert.courseId,
+          cert.courseName,
+          cert.certification,
+          cert.issuedBy,
+          cert.score,
+          cert.completionDate || new Date(),
+          cert.issuedDate || new Date(),
+          cert.expiryDate || null,
+          cert.verificationUrl,
+          cert.pdfUrl,
+          cert.status || 'VALID',
+          JSON.stringify(cert.skills || []),
+          cert.revocation ? JSON.stringify(cert.revocation) : null
+        ]
+      );
+    }
+
+    for (const v of db.verifications) {
+      await pool.query(
+        `INSERT INTO verifications (id, certificate_id, searched_query, requested_at, ip)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (id) DO NOTHING`,
+        [v.id, v.certificateId, v.searchedQuery || null, v.requestedAt || new Date(), v.ip || null]
+      );
+    }
+
+    for (const log of db.auditLogs) {
+      await pool.query(
+        `INSERT INTO audit_logs (id, actor_id, action, entity_type, entity_id, timestamp, status, metadata, ip)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         ON CONFLICT (id) DO NOTHING`,
+        [log.id, log.actorId || null, log.action, log.entityType, log.entityId, log.timestamp || new Date(), log.status || 'SUCCESS', JSON.stringify(log.metadata || {}), log.ip || null]
+      );
+    }
+
+    for (const n of db.notifications) {
+      await pool.query(
+        `INSERT INTO notifications (id, user_id, title, body, read, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (id) DO UPDATE SET read = EXCLUDED.read`,
+        [n.id, n.userId, n.title, n.body, n.read ?? false, n.createdAt || new Date()]
+      );
+    }
+  } catch (error) {
+    console.warn(`PostgreSQL persistence error: ${error.message}`);
+  }
 }
 
 export const isDatabaseEnabled = () => enabled;
+export const getPool = () => pool;

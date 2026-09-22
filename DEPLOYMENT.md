@@ -113,7 +113,7 @@ On Render's free tier, the web service spins down after 15 minutes of inactivity
 5. Open your `learnforge-api` Web Service -> **Environment**.
 6. Add environment variable:
    - `DATABASE_URL`: `<your-copied-database-url>`
-7. Save changes. LearnForge will automatically initialize the database table and persist all users, courses, assessments, and certificates permanently!
+7. Save changes. LearnForge will automatically initialize the 10 relational PostgreSQL tables (`companies`, `users`, `courses`, `enrollments`, `assessments`, `attempts`, `certificates`, `verifications`, `audit_logs`, `notifications`) and persist all records with standard relational foreign keys and indices!
 
 ---
 
