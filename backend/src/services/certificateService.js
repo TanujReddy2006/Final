@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import QRCode from 'qrcode';
-import { db, id, now } from '../data.js';
+import { db, id, now } from '../config/database.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const certificateDir = path.resolve(__dirname, '..', '..', 'storage', 'certificates');

@@ -28,7 +28,7 @@ services:
       JWT_SECRET: change-this-demo-secret
       PORT: 4000
       FRONTEND_URL: http://localhost:5173
-    ports: ["4000:4000"]
+    ports: ["4001:4000"]
     depends_on:
       postgres:
         condition: service_healthy

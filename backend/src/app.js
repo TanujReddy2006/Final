@@ -4,12 +4,11 @@ import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import bcrypt from 'bcryptjs';
-import { db, id, now } from './data.js';
+import { db, query, id, now, persistDatabase, isDatabaseConnected } from './config/database.js';
 import { allow, publicUser, requireAuth, signToken } from './middleware/auth.js';
 import { CertificationEligibilityService } from './services/certificationEligibilityService.js';
 import { issueCertificate, readCertificatePdf } from './services/certificateService.js';
 import { normalizeModule, validateCourseForPublish } from './services/courseValidationService.js';
-import { persistDatabase } from './config/database.js';
 import { getCached, invalidateCached, setCached } from './config/cache.js';
 
 const app = express();
@@ -81,29 +80,29 @@ const response = (res, data, message = '') =>
     data
   });
 
-const audit = (req, action, entityType, entityId, metadata = {}) => {
-  db.auditLogs.push({
-    id: id(),
-    actorId: req.user?.id || null,
-    action,
-    entityType,
-    entityId,
-    timestamp: now(),
-    status: 'SUCCESS',
-    metadata,
-    ip: req.ip
-  });
+const audit = async (req, action, entityType, entityId, metadata = {}) => {
+  await query(
+    `INSERT INTO audit_logs (id, actor_id, action, entity_type, entity_id, timestamp, status, metadata, ip)
+     VALUES ($1, $2, $3, $4, $5, now(), $6, $7, $8)`,
+    [
+      id(),
+      req.user?.id || null,
+      action,
+      entityType,
+      entityId,
+      'SUCCESS',
+      JSON.stringify(metadata),
+      req.ip
+    ]
+  );
 };
 
-const notify = (userId, title, body) => {
-  db.notifications.push({
-    id: id(),
-    userId,
-    title,
-    body,
-    read: false,
-    createdAt: now()
-  });
+const notify = async (userId, title, body) => {
+  await query(
+    `INSERT INTO notifications (id, user_id, title, body, read, created_at)
+     VALUES ($1, $2, $3, $4, false, now())`,
+    [id(), userId, title, body]
+  );
 };
 
 const ownsCourse = (req, course) =>
@@ -147,14 +146,16 @@ app.post('/api/v1/auth/register', async (req, res) => {
     });
   }
 
-  if (db.users.some(u => u.email === email)) {
+  // Check if email already exists
+  const { rows: existingRows } = await query('SELECT id FROM users WHERE email = $1', [email]);
+  if (existingRows.length) {
     return res.status(409).json({
       success: false,
       message: 'Email already registered'
     });
   }
 
-  let companyId;
+  let companyId = null;
   if (role === 'COMPANY') {
     const company = {
       id: id(),
@@ -162,7 +163,10 @@ app.post('/api/v1/auth/register', async (req, res) => {
       description: '',
       website: ''
     };
-    db.companies.push(company);
+    await query(
+      `INSERT INTO companies (id, name, description, website) VALUES ($1, $2, $3, $4)`,
+      [company.id, company.name, company.description, company.website]
+    );
     companyId = company.id;
   }
 
@@ -175,7 +179,10 @@ app.post('/api/v1/auth/register', async (req, res) => {
     companyId,
     active: true
   };
-  db.users.push(user);
+  await query(
+    `INSERT INTO users (id, name, email, password_hash, role, company_id, active) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+    [user.id, user.name, user.email, user.passwordHash, user.role, user.companyId, user.active]
+  );
 
   return response(
     res,
@@ -231,13 +238,10 @@ app.post('/api/v1/auth/reset-password', (_, res) =>
 );
 
 // Course endpoints
-app.get('/api/v1/courses', (req, res) => {
-  const query = String(req.query.search || '').toLowerCase();
-  const courses = db.courses.filter(
-    c =>
-      c.status === 'PUBLISHED' &&
-      (!query || `${c.title} ${c.description} ${c.category}`.toLowerCase().includes(query))
-  );
+app.get('/api/v1/courses', async (req, res) => {
+  const search = String(req.query.search || '').toLowerCase();
+  const { rows } = await query('SELECT * FROM courses WHERE status = $1', ['PUBLISHED']);
+  const courses = rows.filter(c => !search || `${c.title} ${c.description} ${c.category}`.toLowerCase().includes(search));
   response(res, courses.map(courseWithCompany));
 });
 

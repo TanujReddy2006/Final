@@ -1,9 +1,45 @@
+import crypto from 'node:crypto';
+import bcrypt from 'bcryptjs';
 import pg from 'pg';
-import { db } from '../data.js';
 
 const { Pool } = pg;
 let pool;
 let enabled = false;
+
+export const id = () => crypto.randomUUID();
+export const now = () => new Date().toISOString();
+const defaultPasswordHash = bcrypt.hashSync('Demo@123', 10);
+
+export const db = {
+  catalogVersion: 3,
+  users: [
+    { id: 'u-learner', name: 'Maya Chen', email: 'learner@example.com', passwordHash: defaultPasswordHash, role: 'LEARNER', active: true },
+    { id: 'u-company', name: 'Jordan Blake', email: 'company@example.com', passwordHash: defaultPasswordHash, role: 'COMPANY', companyId: 'co-techcorp', active: true },
+    { id: 'u-hr', name: 'Avery Singh', email: 'hr@example.com', passwordHash: defaultPasswordHash, role: 'HR', active: true },
+    { id: 'u-admin', name: 'Riley Admin', email: 'admin@example.com', passwordHash: defaultPasswordHash, role: 'ADMIN', active: true }
+  ],
+  companies: [{ id: 'co-techcorp', name: 'TechCorp', description: 'Demo provider account for local role testing.', website: '' }],
+  courses: [],
+  enrollments: [],
+  assessments: [],
+  attempts: [],
+  certificates: [],
+  auditLogs: [],
+  notifications: [],
+  skills: [],
+  verifications: []
+};
+
+export function isDatabaseConnected() {
+  return enabled && !!pool;
+}
+
+export async function query(text, params) {
+  if (pool && enabled) {
+    return pool.query(text, params);
+  }
+  return { rows: [] };
+}
 
 const DDL_STATEMENTS = `
   DROP TABLE IF EXISTS learnforge_state;

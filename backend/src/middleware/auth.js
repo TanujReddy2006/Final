@@ -1,5 +1,4 @@
 import jwt from 'jsonwebtoken';
-import { db } from '../data.js';
 
 const secret = process.env.JWT_SECRET || 'change-this-demo-secret';
 
