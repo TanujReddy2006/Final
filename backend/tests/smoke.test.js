@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
 import app from '../src/app.js';
-import { db } from '../src/data.js';
+import { db } from '../src/config/database.js';
 
 test('health and demo login work', async () => {
   const health = await request(app).get('/api/v1/health');
@@ -416,6 +416,168 @@ test('deployment readiness: health checks, Vercel CORS, and self-healing PDF reg
     assert.equal(regeneratedBuffer.slice(0, 4).toString(), '%PDF');
   }
 });
+
+test('user registration validates all fields strictly and allows login after creation', async () => {
+  // 1. Missing or short name
+  const res1 = await request(app).post('/api/v1/auth/register').send({
+    name: 'A',
+    email: 'valid1@example.com',
+    password: 'Password@123'
+  });
+  assert.equal(res1.status, 400);
+
+  // 2. Malformed email
+  const res2 = await request(app).post('/api/v1/auth/register').send({
+    name: 'Valid Name',
+    email: 'invalid-email@',
+    password: 'Password@123'
+  });
+  assert.equal(res2.status, 400);
+
+  // 3. Short password
+  const res3 = await request(app).post('/api/v1/auth/register').send({
+    name: 'Valid Name',
+    email: 'valid2@example.com',
+    password: 'P@1'
+  });
+  assert.equal(res3.status, 400);
+
+  // 4. Missing uppercase in password
+  const res4 = await request(app).post('/api/v1/auth/register').send({
+    name: 'Valid Name',
+    email: 'valid3@example.com',
+    password: 'password@123'
+  });
+  assert.equal(res4.status, 400);
+
+  // 5. Missing special character in password
+  const res5 = await request(app).post('/api/v1/auth/register').send({
+    name: 'Valid Name',
+    email: 'valid4@example.com',
+    password: 'Password123'
+  });
+  assert.equal(res5.status, 400);
+
+  // 6. Duplicate email (learner@example.com already exists)
+  const res6 = await request(app).post('/api/v1/auth/register').send({
+    name: 'Duplicate Learner',
+    email: 'learner@example.com',
+    password: 'Password@123'
+  });
+  assert.equal(res6.status, 409);
+
+  // 7. Successful registration
+  const newEmail = `learner_${Date.now()}@example.com`;
+  const regSuccess = await request(app).post('/api/v1/auth/register').send({
+    name: 'New Registered User',
+    email: newEmail,
+    password: 'Password@123'
+  });
+  assert.equal(regSuccess.status, 200);
+  assert.ok(regSuccess.body.data.token);
+  assert.equal(regSuccess.body.data.user.email, newEmail);
+  assert.equal(regSuccess.body.data.user.name, 'New Registered User');
+
+  // 8. Immediate login with the new user credentials
+  const loginSuccess = await request(app).post('/api/v1/auth/login').send({
+    email: newEmail,
+    password: 'Password@123'
+  });
+  assert.equal(loginSuccess.status, 200);
+  assert.ok(loginSuccess.body.data.token);
+  assert.equal(loginSuccess.body.data.user.email, newEmail);
+});
+
+test('profile full name update PATCH /api/v1/users/me enforces authentication and validation', async () => {
+  // 1. Unauthenticated request rejected
+  const unauth = await request(app)
+    .patch('/api/v1/users/me')
+    .send({ name: 'New Name' });
+  assert.equal(unauth.status, 401);
+
+  // Login as demo learner
+  const learner = await request(app)
+    .post('/api/v1/auth/login')
+    .send({ email: 'learner@example.com', password: 'Demo@123' });
+  const token = learner.body.data.token;
+  const headers = { Authorization: `Bearer ${token}` };
+
+  // 2. Empty or invalid name (< 2 characters)
+  const invalidShort = await request(app)
+    .patch('/api/v1/users/me')
+    .set(headers)
+    .send({ name: 'A' });
+  assert.equal(invalidShort.status, 400);
+
+  const invalidEmpty = await request(app)
+    .patch('/api/v1/users/me')
+    .set(headers)
+    .send({ name: '   ' });
+  assert.equal(invalidEmpty.status, 400);
+
+  // 3. Successful name update
+  const updatedName = `Maya Chen ${Date.now().toString().slice(-4)}`;
+  const success = await request(app)
+    .patch('/api/v1/users/me')
+    .set(headers)
+    .send({ name: updatedName });
+  assert.equal(success.status, 200);
+  assert.equal(success.body.data.user.name, updatedName);
+
+  // Verify /auth/me reflects the new name
+  const me = await request(app).get('/api/v1/auth/me').set(headers);
+  assert.equal(me.status, 200);
+  assert.equal(me.body.data.name, updatedName);
+});
+
+test('course publishing makes course immediately available in learner catalog', async () => {
+  const company = await request(app)
+    .post('/api/v1/auth/login')
+    .send({ email: 'company@example.com', password: 'Demo@123' });
+  const companyHeaders = { Authorization: `Bearer ${company.body.data.token}` };
+
+  // Create draft course
+  const draftRes = await request(app)
+    .post('/api/v1/courses/draft')
+    .set(companyHeaders)
+    .send({
+      title: 'Catalog Test Course',
+      description: 'Course to verify immediate appearance in learner catalog',
+      modules: [
+        {
+          title: 'Module 1',
+          lessons: [{ title: 'Lesson 1', content: 'Study material', type: 'READING' }]
+        }
+      ],
+      assessmentTitle: 'Final Exam',
+      passingScore: 70,
+      questions: [
+        {
+          id: 'cat-q1',
+          text: 'Is course catalog working?',
+          marks: 1,
+          options: [{ id: 'opt-yes', text: 'Yes', correct: true }]
+        }
+      ]
+    });
+  assert.equal(draftRes.status, 200);
+  const courseId = draftRes.body.data.id;
+
+  // Publish course
+  const publishRes = await request(app)
+    .patch(`/api/v1/courses/${courseId}/publish`)
+    .set(companyHeaders);
+  assert.equal(publishRes.status, 200);
+  assert.equal(publishRes.body.data.status, 'PUBLISHED');
+
+  // Verify learner catalog GET /api/v1/courses immediately contains the published course
+  const catalogRes = await request(app).get('/api/v1/courses');
+  assert.equal(catalogRes.status, 200);
+  const found = catalogRes.body.data.find(c => c.id === courseId);
+  assert.ok(found, 'Published course must be present in learner catalog');
+  assert.equal(found.title, 'Catalog Test Course');
+});
+
 
 
 

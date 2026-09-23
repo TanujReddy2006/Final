@@ -4,7 +4,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import bcrypt from 'bcryptjs';
-import { db, query, id, now, persistDatabase, isDatabaseConnected } from './config/database.js';
+import { db, query, id, now, persistDatabase, isDatabaseConnected, mapCourse } from './config/database.js';
 import { allow, publicUser, requireAuth, signToken } from './middleware/auth.js';
 import { CertificationEligibilityService } from './services/certificationEligibilityService.js';
 import { issueCertificate, readCertificatePdf } from './services/certificateService.js';
@@ -138,17 +138,61 @@ app.get(['/health', '/healthz', '/api/v1/health'], (_, res) =>
 
 // Auth endpoints
 app.post('/api/v1/auth/register', async (req, res) => {
-  const { name, email, password, role = 'LEARNER', companyName } = req.body;
-  if (!name || !email || !password) {
+  const name = String(req.body.name || '').trim();
+  const email = String(req.body.email || '').trim().toLowerCase();
+  const password = String(req.body.password || '');
+  const role = ['LEARNER', 'COMPANY', 'HR'].includes(req.body.role) ? req.body.role : 'LEARNER';
+  const companyName = String(req.body.companyName || '').trim();
+
+  // Validate Name
+  if (!name || name.length < 2) {
     return res.status(400).json({
       success: false,
-      message: 'Name, email and password are required'
+      message: 'Full name is required (at least 2 characters)'
     });
   }
 
-  // Check if email already exists
-  const { rows: existingRows } = await query('SELECT id FROM users WHERE email = $1', [email]);
-  if (existingRows.length) {
+  // Validate Email
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!email || !emailRegex.test(email)) {
+    return res.status(400).json({
+      success: false,
+      message: 'Valid email address is required (e.g. user@example.com)'
+    });
+  }
+
+  // Validate Password: min 6 chars, >= 1 uppercase letter, >= 1 special character
+  if (!password || password.length < 6) {
+    return res.status(400).json({
+      success: false,
+      message: 'Password must be at least 6 characters long'
+    });
+  }
+  if (!/[A-Z]/.test(password)) {
+    return res.status(400).json({
+      success: false,
+      message: 'Password must contain at least one uppercase letter'
+    });
+  }
+  if (!/[!@#$%^&*(),.?":{}|<>_~`'+\-=\\/[\]]/.test(password)) {
+    return res.status(400).json({
+      success: false,
+      message: 'Password must contain at least one special character'
+    });
+  }
+
+  // Validate Company name if role === COMPANY
+  if (role === 'COMPANY' && (!companyName || companyName.length < 2)) {
+    return res.status(400).json({
+      success: false,
+      message: 'Company name is required for company provider accounts'
+    });
+  }
+
+  // Check email uniqueness across PostgreSQL and db.users
+  const existingEmailInDb = db.users.some(u => u.email && u.email.toLowerCase() === email);
+  const { rows: existingEmailRows } = await query('SELECT id FROM users WHERE LOWER(email) = LOWER($1)', [email]);
+  if (existingEmailInDb || existingEmailRows.length > 0) {
     return res.status(409).json({
       success: false,
       message: 'Email already registered'
@@ -164,9 +208,10 @@ app.post('/api/v1/auth/register', async (req, res) => {
       website: ''
     };
     await query(
-      `INSERT INTO companies (id, name, description, website) VALUES ($1, $2, $3, $4)`,
+      `INSERT INTO companies (id, name, description, website) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING`,
       [company.id, company.name, company.description, company.website]
     );
+    db.companies.push(company);
     companyId = company.id;
   }
 
@@ -179,10 +224,15 @@ app.post('/api/v1/auth/register', async (req, res) => {
     companyId,
     active: true
   };
+
   await query(
     `INSERT INTO users (id, name, email, password_hash, role, company_id, active) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
     [user.id, user.name, user.email, user.passwordHash, user.role, user.companyId, user.active]
   );
+  db.users.push(user);
+  persistDatabase().catch(err => console.error('PostgreSQL persistence error:', err.message));
+
+  audit(req, 'REGISTER', 'USER', user.id);
 
   return response(
     res,
@@ -195,8 +245,17 @@ app.post('/api/v1/auth/register', async (req, res) => {
 });
 
 app.post('/api/v1/auth/login', async (req, res) => {
-  const user = db.users.find(u => u.email === req.body.email);
-  if (!user || !user.active || !(await bcrypt.compare(req.body.password || '', user.passwordHash))) {
+  const email = String(req.body.email || '').trim().toLowerCase();
+  const password = String(req.body.password || '');
+  if (!email || !password) {
+    return res.status(400).json({
+      success: false,
+      message: 'Email and password are required'
+    });
+  }
+
+  const user = db.users.find(u => u.email && u.email.toLowerCase() === email);
+  if (!user || !user.active || !(await bcrypt.compare(password, user.passwordHash))) {
     return res.status(401).json({
       success: false,
       message: 'Invalid credentials'
@@ -229,6 +288,33 @@ app.get('/api/v1/auth/me', requireAuth, (req, res) => {
   return response(res, publicUser(user));
 });
 
+app.patch('/api/v1/users/me', requireAuth, async (req, res) => {
+  const userId = req.user.id;
+  const user = db.users.find(u => u.id === userId);
+  if (!user) {
+    return res.status(404).json({
+      success: false,
+      message: 'User not found'
+    });
+  }
+
+  const rawName = req.body.name;
+  if (!rawName || typeof rawName !== 'string' || rawName.trim().length < 2) {
+    return res.status(400).json({
+      success: false,
+      message: 'Full name is required (at least 2 characters)'
+    });
+  }
+
+  const name = rawName.trim();
+  user.name = name;
+  await query('UPDATE users SET name = $1 WHERE id = $2', [name, userId]);
+  await persistDatabase().catch(err => console.error('PostgreSQL persistence error:', err.message));
+
+  audit(req, 'NAME_UPDATED', 'USER', userId, { name });
+  return response(res, { user: publicUser(user) }, 'Profile updated successfully');
+});
+
 app.post('/api/v1/auth/forgot-password', (_, res) =>
   response(res, null, 'If the account exists, reset instructions have been queued')
 );
@@ -240,13 +326,53 @@ app.post('/api/v1/auth/reset-password', (_, res) =>
 // Course endpoints
 app.get('/api/v1/courses', async (req, res) => {
   const search = String(req.query.search || '').toLowerCase();
-  const { rows } = await query('SELECT * FROM courses WHERE status = $1', ['PUBLISHED']);
-  const courses = rows.filter(c => !search || `${c.title} ${c.description} ${c.category}`.toLowerCase().includes(search));
-  response(res, courses.map(courseWithCompany));
+
+  // Combine PostgreSQL rows with db.courses so changes (like publishing) are immediately visible
+  const memPublished = db.courses.filter(c => c.status === 'PUBLISHED');
+  const courseMap = new Map();
+
+  if (isDatabaseConnected()) {
+    try {
+      const { rows } = await query('SELECT * FROM courses WHERE status = $1', ['PUBLISHED']);
+      if (rows && rows.length > 0) {
+        for (const row of rows) {
+          const c = mapCourse(row);
+          courseMap.set(c.id, c);
+        }
+      }
+    } catch (err) {
+      console.warn('PostgreSQL courses query failed:', err.message);
+    }
+  }
+
+  // In-memory has latest edits/publishes from current server session
+  for (const c of memPublished) {
+    courseMap.set(c.id, c);
+  }
+
+  let list = Array.from(courseMap.values());
+  if (search) {
+    list = list.filter(c =>
+      `${c.title} ${c.description} ${c.category} ${c.instructorName}`.toLowerCase().includes(search)
+    );
+  }
+
+  response(res, list.map(courseWithCompany));
 });
 
-app.get('/api/v1/courses/:id', (req, res) => {
-  const course = db.courses.find(c => c.id === req.params.id);
+app.get('/api/v1/courses/:id', async (req, res) => {
+  let course = db.courses.find(c => c.id === req.params.id);
+  if ((!course || course.status !== 'PUBLISHED') && isDatabaseConnected()) {
+    try {
+      const { rows } = await query('SELECT * FROM courses WHERE id = $1', [req.params.id]);
+      if (rows && rows.length > 0) {
+        course = mapCourse(rows[0]);
+      }
+    } catch (err) {
+      console.warn('PostgreSQL course by id query failed:', err.message);
+    }
+  }
+
   if (!course || course.status !== 'PUBLISHED') {
     return res.status(404).json({
       success: false,
@@ -401,6 +527,7 @@ app.post('/api/v1/courses/draft', requireAuth, allow('COMPANY'), (req, res) => {
   assessment.courseId = course.id;
   db.courses.push(course);
   db.assessments.push(assessment);
+  persistDatabase().catch(err => console.error('PostgreSQL persistence error:', err.message));
   audit(req, 'COURSE_DRAFT_CREATED', 'COURSE', course.id);
   response(res, courseWithCompany(course), 'Draft saved');
 });
@@ -476,6 +603,7 @@ app.post('/api/v1/courses', requireAuth, allow('COMPANY'), (req, res) => {
   course.assessmentId = assessment.id;
   db.courses.push(course);
   db.assessments.push(assessment);
+  persistDatabase().catch(err => console.error('PostgreSQL persistence error:', err.message));
   audit(req, 'COURSE_CREATED', 'COURSE', course.id);
   response(res, courseWithCompany(course), 'Course created successfully');
 });
@@ -513,6 +641,7 @@ app.patch('/api/v1/courses/:id', requireAuth, allow('COMPANY'), (req, res) => {
       : course.modules
   });
 
+  persistDatabase().catch(err => console.error('PostgreSQL persistence error:', err.message));
   audit(req, 'COURSE_UPDATED', 'COURSE', course.id);
   response(res, courseWithCompany(course), 'Course updated successfully');
 });
@@ -530,11 +659,13 @@ app.delete('/api/v1/courses/:id', requireAuth, allow('COMPANY'), (req, res) => {
   db.courses.splice(index, 1);
   db.assessments = db.assessments.filter(assessment => assessment.courseId !== course.id);
   db.enrollments = db.enrollments.filter(enrollment => enrollment.courseId !== course.id);
+  query('DELETE FROM courses WHERE id = $1', [course.id]).catch(() => {});
+  persistDatabase().catch(err => console.error('PostgreSQL persistence error:', err.message));
   audit(req, 'COURSE_DELETED', 'COURSE', course.id);
   response(res, null, 'Course deleted');
 });
 
-app.patch('/api/v1/courses/:id/publish', requireAuth, allow('COMPANY'), (req, res) => {
+app.patch('/api/v1/courses/:id/publish', requireAuth, allow('COMPANY'), async (req, res) => {
   const course = db.courses.find(item => item.id === req.params.id);
   if (!course || !ownsCourse(req, course)) {
     return res.status(404).json({
@@ -555,6 +686,9 @@ app.patch('/api/v1/courses/:id/publish', requireAuth, allow('COMPANY'), (req, re
   }
 
   course.status = course.status === 'PUBLISHED' ? 'UNPUBLISHED' : 'PUBLISHED';
+  await query('UPDATE courses SET status = $1, updated_at = NOW() WHERE id = $2', [course.status, course.id]);
+  await persistDatabase().catch(err => console.error('PostgreSQL persistence error:', err.message));
+
   audit(req, 'COURSE_PUBLICATION_CHANGED', 'COURSE', course.id, {
     status: course.status
   });
@@ -743,8 +877,17 @@ app.post(
     if (!enrollment.completedLessonIds.includes(lesson.id)) {
       enrollment.completedLessonIds.push(lesson.id);
     }
+    enrollment.completedLessons = enrollment.completedLessonIds;
+    enrollment.lastAccessed = now();
 
-    response(res, { completedLessonIds: enrollment.completedLessonIds }, 'Lesson completed');
+    response(
+      res,
+      {
+        completedLessonIds: enrollment.completedLessonIds,
+        completedLessons: enrollment.completedLessonIds
+      },
+      'Lesson completed'
+    );
   }
 );
 

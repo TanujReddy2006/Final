@@ -8,6 +8,7 @@ import {
   CheckCircle2,
   ChevronRight,
   Download,
+  Edit3,
   FileCheck2,
   Lock,
   Mail,
@@ -18,6 +19,7 @@ import {
   Trash2,
   UserCheck,
   Users,
+  X,
   XCircle
 } from 'lucide-react';
 import { api, unwrap } from './services/api';
@@ -337,12 +339,92 @@ export function LearnerOverview({ user }) {
   );
 }
 
-export function LearnerProfile({ user }) {
+export function LearnerProfile({ user: initialUser }) {
   const [data, setData] = useState(null);
+  const [currentUser, setCurrentUser] = useState(initialUser);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [nameInput, setNameInput] = useState('');
+  const [nameError, setNameError] = useState('');
+  const [saveLoading, setSaveLoading] = useState(false);
+  const [feedbackMessage, setFeedbackMessage] = useState({ text: '', type: '' });
 
   useEffect(() => {
-    unwrap(api.get('/dashboard')).then(setData);
+    unwrap(api.get('/dashboard'))
+      .then(res => {
+        setData(res);
+        if (res?.user) {
+          setCurrentUser(res.user);
+        }
+      })
+      .catch(console.error);
   }, []);
+
+  // Handle ESC key to close modal
+  useEffect(() => {
+    const handleKeyDown = e => {
+      if (e.key === 'Escape' && isModalOpen) {
+        setIsModalOpen(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isModalOpen]);
+
+  const openModal = () => {
+    setNameInput(currentUser.name || '');
+    setNameError('');
+    setIsModalOpen(true);
+  };
+
+  const closeModal = () => {
+    setIsModalOpen(false);
+    setNameError('');
+  };
+
+  const handleNameChange = val => {
+    setNameInput(val);
+    if (!val.trim()) {
+      setNameError('Full name is required');
+    } else if (val.trim().length < 2) {
+      setNameError('Full name must be at least 2 characters');
+    } else {
+      setNameError('');
+    }
+  };
+
+  const handleSaveName = async e => {
+    e?.preventDefault();
+    const trimmed = nameInput.trim();
+    if (!trimmed) {
+      setNameError('Full name is required');
+      return;
+    }
+    if (trimmed.length < 2) {
+      setNameError('Full name must be at least 2 characters');
+      return;
+    }
+
+    setSaveLoading(true);
+    setNameError('');
+    try {
+      const res = await unwrap(api.patch('/users/me', { name: trimmed }));
+      const updatedUser = { ...currentUser, ...res.user, name: trimmed };
+      setCurrentUser(updatedUser);
+      // Persist in localStorage so page reloads have the latest user
+      try {
+        localStorage.setItem('learnforge_user', JSON.stringify(updatedUser));
+      } catch {
+        // ignore
+      }
+      setFeedbackMessage({ text: 'Full name updated successfully!', type: 'success' });
+      setIsModalOpen(false);
+      setTimeout(() => setFeedbackMessage({ text: '', type: '' }), 4000);
+    } catch (err) {
+      setNameError(err.response?.data?.message || 'Could not update name. Please try again.');
+    } finally {
+      setSaveLoading(false);
+    }
+  };
 
   const enrollments = data?.enrollments || [];
   const certs = data?.certificates || [];
@@ -351,12 +433,12 @@ export function LearnerProfile({ user }) {
     <>
       <Title
         eyebrow="LEARNER PROFILE"
-        title={user.name}
+        title={currentUser.name}
         sub="Your verified skills profile and credentials summary."
       />
 
       <div className="stats-grid">
-        <Stat label="Account role" value={user.role} icon={UserCheck} />
+        <Stat label="Account role" value={currentUser.role} icon={UserCheck} />
         <Stat label="Enrolled courses" value={enrollments.length} icon={BookOpen} />
         <Stat label="Certifications" value={certs.length} icon={Award} />
         <Stat
@@ -366,19 +448,51 @@ export function LearnerProfile({ user }) {
         />
       </div>
 
+      {feedbackMessage.text && (
+        <div
+          style={{
+            marginBottom: '20px',
+            padding: '12px 18px',
+            borderRadius: '8px',
+            background: feedbackMessage.type === 'success' ? '#e3f7ed' : '#fff0ee',
+            color: feedbackMessage.type === 'success' ? '#1e754a' : '#b64c39',
+            fontWeight: 600,
+            fontSize: '13px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px'
+          }}
+        >
+          <CheckCircle2 size={16} /> {feedbackMessage.text}
+        </div>
+      )}
+
       <div className="dashboard-lower">
         <section className="panel">
-          <div className="panel-heading">
+          <div className="panel-heading" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <h3>Account details</h3>
+            <button
+              type="button"
+              className="button dark"
+              style={{ height: '34px', fontSize: '12px', padding: '0 14px', gap: '6px' }}
+              onClick={openModal}
+              title="Edit full name in profile modal"
+            >
+              <Edit3 size={13} /> Edit Profile
+            </button>
           </div>
           <div style={{ display: 'grid', gap: '15px' }}>
             <div>
               <small className="muted">FULL NAME</small>
-              <p style={{ margin: '4px 0 0', fontWeight: 600 }}>{user.name}</p>
+              <p style={{ margin: '4px 0 0', fontWeight: 600 }}>{currentUser.name}</p>
             </div>
             <div>
               <small className="muted">EMAIL ADDRESS</small>
-              <p style={{ margin: '4px 0 0', fontWeight: 600 }}>{user.email}</p>
+              <p style={{ margin: '4px 0 0', fontWeight: 600 }}>{currentUser.email}</p>
+            </div>
+            <div>
+              <small className="muted">ACCOUNT ROLE</small>
+              <p style={{ margin: '4px 0 0', fontWeight: 600 }}>{currentUser.role}</p>
             </div>
             <div>
               <small className="muted">STATUS</small>
@@ -388,6 +502,84 @@ export function LearnerProfile({ user }) {
             </div>
           </div>
         </section>
+
+        {isModalOpen && (
+          <div className="modal-backdrop" onClick={closeModal} role="dialog" aria-modal="true" aria-labelledby="modal-title">
+            <div className="modal-card" onClick={e => e.stopPropagation()}>
+              <div className="modal-header">
+                <div>
+                  <h3 id="modal-title">Edit Profile</h3>
+                  <small className="muted">You can edit your full name below. Other fields are read-only.</small>
+                </div>
+                <button type="button" className="modal-close" onClick={closeModal} aria-label="Close modal">
+                  <X size={18} />
+                </button>
+              </div>
+
+              <form onSubmit={handleSaveName}>
+                <div className="modal-body">
+                  <label className="field" style={{ marginTop: 0 }}>
+                    <span>Full name (editable)</span>
+                    <input
+                      type="text"
+                      value={nameInput}
+                      onChange={e => handleNameChange(e.target.value)}
+                      placeholder="e.g. Maya Chen"
+                      autoFocus
+                    />
+                    {nameError && <span className="field-error">{nameError}</span>}
+                  </label>
+
+                  <label className="field field-readonly" style={{ marginTop: '12px' }}>
+                    <span>Email address (read-only)</span>
+                    <input
+                      type="email"
+                      value={currentUser.email || ''}
+                      disabled
+                      readOnly
+                      title="Email address cannot be edited"
+                    />
+                  </label>
+
+                  <label className="field field-readonly" style={{ marginTop: '12px' }}>
+                    <span>Account role (read-only)</span>
+                    <input
+                      type="text"
+                      value={currentUser.role || ''}
+                      disabled
+                      readOnly
+                      title="Account role is managed by administrator"
+                    />
+                  </label>
+
+                  <label className="field field-readonly" style={{ marginTop: '12px' }}>
+                    <span>Status (read-only)</span>
+                    <input
+                      type="text"
+                      value="ACTIVE ACCOUNT"
+                      disabled
+                      readOnly
+                      title="Account status"
+                    />
+                  </label>
+                </div>
+
+                <div className="modal-footer">
+                  <button type="button" className="button" onClick={closeModal} disabled={saveLoading}>
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="button primary"
+                    disabled={saveLoading || !!nameError}
+                  >
+                    {saveLoading ? 'Saving...' : 'Save changes'}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
 
         <section className="panel">
           <div className="panel-heading">

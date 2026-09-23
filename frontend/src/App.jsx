@@ -81,17 +81,98 @@ function Auth({ onAuthenticate }) {
     role: 'LEARNER',
     companyName: ''
   });
-  const [error, setError] = useState('');
+  const [fieldErrors, setFieldErrors] = useState({});
+  const [serverError, setServerError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+
+  const validate = () => {
+    const errors = {};
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+    if (register) {
+      if (!form.name.trim() || form.name.trim().length < 2) {
+        errors.name = 'Full name is required (minimum 2 characters)';
+      }
+      if (form.role === 'COMPANY' && (!form.companyName.trim() || form.companyName.trim().length < 2)) {
+        errors.companyName = 'Company name is required';
+      }
+      if (!form.email.trim() || !emailRegex.test(form.email.trim())) {
+        errors.email = 'Valid email is required (e.g. user@example.com)';
+      }
+      if (!form.password || form.password.length < 6) {
+        errors.password = 'Password must be at least 6 characters';
+      } else if (!/[A-Z]/.test(form.password)) {
+        errors.password = 'Password must include at least one uppercase letter';
+      } else if (!/[!@#$%^&*(),.?":{}|<>_~`'+\-=\\/[\]]/.test(form.password)) {
+        errors.password = 'Password must include at least one special character (e.g. !@#$)';
+      }
+    } else {
+      if (!form.email.trim()) {
+        errors.email = 'Email address is required';
+      }
+      if (!form.password) {
+        errors.password = 'Password is required';
+      }
+    }
+
+    setFieldErrors(errors);
+    return Object.keys(errors).length === 0;
+  };
 
   const submit = async e => {
     e.preventDefault();
+    setServerError('');
+
+    if (!validate()) {
+      return;
+    }
+
+    setSubmitting(true);
     try {
       await onAuthenticate(
         register ? '/auth/register' : '/auth/login',
-        register ? form : { email: form.email, password: form.password }
+        register
+          ? {
+              name: form.name.trim(),
+              email: form.email.trim().toLowerCase(),
+              password: form.password,
+              role: form.role,
+              companyName: form.companyName.trim()
+            }
+          : {
+              email: form.email.trim().toLowerCase(),
+              password: form.password
+            }
       );
     } catch (err) {
-      setError(err.response?.data?.message || 'Unable to complete account action');
+      setServerError(err.response?.data?.message || 'Unable to complete account action');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const switchMode = toRegister => {
+    setRegister(toRegister);
+    setFieldErrors({});
+    setServerError('');
+    if (toRegister) {
+      // Clear prefilled demo credentials for new registration
+      setForm({
+        email: '',
+        password: '',
+        name: '',
+        role: 'LEARNER',
+        companyName: ''
+      });
+    } else {
+      // Convenient demo default for sign-in
+      setForm({
+        email: 'learner@example.com',
+        password: 'Demo@123',
+        name: '',
+        role: 'LEARNER',
+        companyName: ''
+      });
     }
   };
 
@@ -131,13 +212,18 @@ function Auth({ onAuthenticate }) {
               : 'Sign in to pick up where you left off.'}
           </p>
 
-          <form onSubmit={submit}>
+          <form onSubmit={submit} noValidate>
             {register && (
               <Field
                 label="Full name"
                 value={form.name}
-                onChange={v => setForm({ ...form, name: v })}
+                onChange={v => {
+                  setForm({ ...form, name: v });
+                  if (fieldErrors.name) setFieldErrors({ ...fieldErrors, name: '' });
+                }}
+                error={fieldErrors.name}
                 placeholder="Maya Chen"
+                required
               />
             )}
             {register && (
@@ -157,39 +243,55 @@ function Auth({ onAuthenticate }) {
               <Field
                 label="Company name"
                 value={form.companyName}
-                onChange={v => setForm({ ...form, companyName: v })}
+                onChange={v => {
+                  setForm({ ...form, companyName: v });
+                  if (fieldErrors.companyName) setFieldErrors({ ...fieldErrors, companyName: '' });
+                }}
+                error={fieldErrors.companyName}
                 placeholder="Acme Learning"
+                required
               />
             )}
             <Field
               label="Email address"
               value={form.email}
-              onChange={v => setForm({ ...form, email: v })}
+              onChange={v => {
+                setForm({ ...form, email: v });
+                if (fieldErrors.email) setFieldErrors({ ...fieldErrors, email: '' });
+              }}
+              error={fieldErrors.email}
               placeholder="you@company.com"
               type="email"
+              required
             />
             <Field
-              label="Password"
+              label={register ? "Password (min 6 chars, 1 uppercase, 1 special character)" : "Password"}
               value={form.password}
-              onChange={v => setForm({ ...form, password: v })}
-              placeholder="••••••••"
+              onChange={v => {
+                setForm({ ...form, password: v });
+                if (fieldErrors.password) setFieldErrors({ ...fieldErrors, password: '' });
+              }}
+              error={fieldErrors.password}
+              placeholder={register ? "Password@123" : "••••••••"}
               type="password"
+              required
             />
 
-            {error && <div className="error">{error}</div>}
+            {serverError && <div className="error">{serverError}</div>}
 
-            <button className="button primary wide">
-              {register ? 'Create account' : 'Sign in'} <ChevronRight size={17} />
+            <button className="button primary wide" type="submit" disabled={submitting}>
+              {submitting
+                ? (register ? 'Creating account...' : 'Signing in...')
+                : (register ? 'Create account' : 'Sign in')}{' '}
+              <ChevronRight size={17} />
             </button>
           </form>
 
           <div className="form-switch">
             {register ? 'Already have an account?' : 'New to learnforge?'}{' '}
             <button
-              onClick={() => {
-                setRegister(!register);
-                setError('');
-              }}
+              type="button"
+              onClick={() => switchMode(!register)}
             >
               {register ? 'Sign in' : 'Create account'}
             </button>
@@ -200,10 +302,13 @@ function Auth({ onAuthenticate }) {
             <div>
               {Object.entries(demo).map(([key, value]) => (
                 <button
+                  type="button"
                   key={key}
                   onClick={() => {
+                    setRegister(false);
+                    setFieldErrors({});
+                    setServerError('');
                     setForm({ ...form, email: value[0], password: 'Demo@123' });
-                    setError('');
                   }}
                 >
                   {key}
@@ -217,11 +322,12 @@ function Auth({ onAuthenticate }) {
   );
 }
 
-function Field({ label, value, onChange, ...props }) {
+function Field({ label, value, onChange, error, ...props }) {
   return (
     <label className="field">
       <span>{label}</span>
       <input value={value} onChange={e => onChange(e.target.value)} {...props} />
+      {error && <span className="field-error">{error}</span>}
     </label>
   );
 }
@@ -301,9 +407,7 @@ function Shell({ user, logout, menu, setMenu, children }) {
             </strong>
           </div>
           <div className="top-actions">
-            <button className="icon-button">
-              <Search size={18} />
-            </button>
+
             <span className="notification">
               <span />
             </span>

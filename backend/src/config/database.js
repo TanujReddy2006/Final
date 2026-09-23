@@ -13,10 +13,10 @@ const defaultPasswordHash = bcrypt.hashSync('Demo@123', 10);
 export const db = {
   catalogVersion: 3,
   users: [
-    { id: 'u-learner', name: 'Maya Chen', email: 'learner@example.com', passwordHash: defaultPasswordHash, role: 'LEARNER', active: true },
-    { id: 'u-company', name: 'Jordan Blake', email: 'company@example.com', passwordHash: defaultPasswordHash, role: 'COMPANY', companyId: 'co-techcorp', active: true },
-    { id: 'u-hr', name: 'Avery Singh', email: 'hr@example.com', passwordHash: defaultPasswordHash, role: 'HR', active: true },
-    { id: 'u-admin', name: 'Riley Admin', email: 'admin@example.com', passwordHash: defaultPasswordHash, role: 'ADMIN', active: true }
+    { id: 'u-learner', name: 'Maya Chen', username: 'mayachen', email: 'learner@example.com', passwordHash: defaultPasswordHash, role: 'LEARNER', active: true },
+    { id: 'u-company', name: 'Jordan Blake', username: 'jordanblake', email: 'company@example.com', passwordHash: defaultPasswordHash, role: 'COMPANY', companyId: 'co-techcorp', active: true },
+    { id: 'u-hr', name: 'Avery Singh', username: 'averysingh', email: 'hr@example.com', passwordHash: defaultPasswordHash, role: 'HR', active: true },
+    { id: 'u-admin', name: 'Riley Admin', username: 'rileyadmin', email: 'admin@example.com', passwordHash: defaultPasswordHash, role: 'ADMIN', active: true }
   ],
   companies: [{ id: 'co-techcorp', name: 'TechCorp', description: 'Demo provider account for local role testing.', website: '' }],
   courses: [],
@@ -82,6 +82,7 @@ const DDL_STATEMENTS = `
     modules JSONB NOT NULL DEFAULT '[]',
     skills JSONB NOT NULL DEFAULT '[]',
     assessment_id VARCHAR(100),
+    video_url VARCHAR(500),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
   );
@@ -202,7 +203,7 @@ const mapUser = r => ({
   createdAt: r.created_at
 });
 
-const mapCourse = r => ({
+export const mapCourse = r => ({
   id: r.id,
   title: r.title,
   description: r.description,
@@ -221,21 +222,28 @@ const mapCourse = r => ({
   modules: parseJson(r.modules) || [],
   skills: parseJson(r.skills) || [],
   assessmentId: r.assessment_id,
+  videoUrl: r.video_url || '',
   createdAt: r.created_at,
   updatedAt: r.updated_at
 });
 
-const mapEnrollment = r => ({
-  id: r.id,
-  userId: r.user_id,
-  courseId: r.course_id,
-  progress: r.progress,
-  status: r.status,
-  completedModules: parseJson(r.completed_modules) || [],
-  completedLessons: parseJson(r.completed_lessons) || [],
-  startedAt: r.started_at,
-  completedAt: r.completed_at
-});
+const mapEnrollment = r => {
+  const completedModules = parseJson(r.completed_modules) || [];
+  const completedLessons = parseJson(r.completed_lessons) || [];
+  return {
+    id: r.id,
+    userId: r.user_id,
+    courseId: r.course_id,
+    progress: r.progress,
+    status: r.status,
+    completedModules,
+    completedLessons,
+    completedModuleIds: completedModules,
+    completedLessonIds: completedLessons,
+    startedAt: r.started_at,
+    completedAt: r.completed_at
+  };
+};
 
 const mapAssessment = r => ({
   id: r.id,
@@ -328,6 +336,12 @@ export async function initDatabase() {
     // Execute relational schema DDL
     await pool.query(DDL_STATEMENTS);
 
+    // Self-healing schema migration for existing databases
+    await pool.query(`
+      ALTER TABLE courses ADD COLUMN IF NOT EXISTS video_url VARCHAR(500);
+      ALTER TABLE courses ADD COLUMN IF NOT EXISTS detailed_description TEXT;
+    `).catch(() => {});
+
     // Seed default companies and users if not already present
     const userCountRes = await pool.query('SELECT COUNT(*) AS count FROM users');
     if (parseInt(userCountRes.rows[0].count, 10) === 0) {
@@ -344,7 +358,12 @@ export async function initDatabase() {
         await pool.query(
           `INSERT INTO users (id, name, email, password_hash, role, company_id, active)
            VALUES ($1, $2, $3, $4, $5, $6, $7)
-           ON CONFLICT (id) DO NOTHING`,
+           ON CONFLICT (id) DO UPDATE SET
+             name = EXCLUDED.name,
+             email = EXCLUDED.email,
+             role = EXCLUDED.role,
+             active = EXCLUDED.active,
+             company_id = EXCLUDED.company_id`,
           [usr.id, usr.name, usr.email, usr.passwordHash, usr.role, usr.companyId || null, usr.active ?? true]
         );
       }
@@ -419,9 +438,9 @@ export async function persistDatabase() {
         `INSERT INTO courses (
            id, title, description, detailed_description, thumbnail, category, difficulty, duration,
            instructor_name, instructor_bio, prerequisites, learning_objectives, target_audience,
-           status, company_id, modules, skills, assessment_id
+           status, company_id, modules, skills, assessment_id, video_url
          )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
          ON CONFLICT (id) DO UPDATE SET
            title = EXCLUDED.title,
            description = EXCLUDED.description,
@@ -439,6 +458,7 @@ export async function persistDatabase() {
            modules = EXCLUDED.modules,
            skills = EXCLUDED.skills,
            assessment_id = EXCLUDED.assessment_id,
+           video_url = EXCLUDED.video_url,
            updated_at = NOW()`,
         [
           c.id,
@@ -458,12 +478,15 @@ export async function persistDatabase() {
           c.companyId,
           JSON.stringify(c.modules || []),
           JSON.stringify(c.skills || []),
-          c.assessmentId || null
+          c.assessmentId || null,
+          c.videoUrl || c.video_url || null
         ]
       );
     }
 
     for (const e of db.enrollments) {
+      const completedModules = e.completedModuleIds || e.completedModules || [];
+      const completedLessons = e.completedLessonIds || e.completedLessons || [];
       await pool.query(
         `INSERT INTO enrollments (id, user_id, course_id, progress, status, completed_modules, completed_lessons, started_at, completed_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -479,8 +502,8 @@ export async function persistDatabase() {
           e.courseId,
           e.progress || 0,
           e.status || 'IN_PROGRESS',
-          JSON.stringify(e.completedModules || []),
-          JSON.stringify(e.completedLessons || []),
+          JSON.stringify(completedModules),
+          JSON.stringify(completedLessons),
           e.startedAt || new Date(),
           e.completedAt || null
         ]
