@@ -253,6 +253,20 @@ test('admin endpoints allow managing users and viewing certificates', async () =
   const certsRes = await request(app).get('/api/v1/admin/certificates').set(adminHeaders);
   assert.equal(certsRes.status, 200);
   assert.ok(Array.isArray(certsRes.body.data));
+
+  // Cannot promote another user to ADMIN
+  const promoteRes = await request(app)
+    .patch('/api/v1/admin/users/u-learner')
+    .set(adminHeaders)
+    .send({ role: 'ADMIN' });
+  assert.equal(promoteRes.status, 400);
+
+  // Cannot deactivate the sole admin account
+  const deactRes = await request(app)
+    .patch('/api/v1/admin/users/u-admin')
+    .set(adminHeaders)
+    .send({ active: false });
+  assert.equal(deactRes.status, 400);
 });
 
 test('company can view learners enrolled in their courses', async () => {
@@ -486,6 +500,16 @@ test('user registration validates all fields strictly and allows login after cre
   assert.equal(loginSuccess.status, 200);
   assert.ok(loginSuccess.body.data.token);
   assert.equal(loginSuccess.body.data.user.email, newEmail);
+
+  // 9. Registration as ADMIN is strictly prohibited
+  const adminRegRes = await request(app).post('/api/v1/auth/register').send({
+    name: 'Rogue Admin',
+    email: 'rogue_admin@example.com',
+    password: 'Password@123',
+    role: 'ADMIN'
+  });
+  assert.equal(adminRegRes.status, 403);
+  assert.equal(adminRegRes.body.success, false);
 });
 
 test('profile full name update PATCH /api/v1/users/me enforces authentication and validation', async () => {
@@ -576,6 +600,93 @@ test('course publishing makes course immediately available in learner catalog', 
   const found = catalogRes.body.data.find(c => c.id === courseId);
   assert.ok(found, 'Published course must be present in learner catalog');
   assert.equal(found.title, 'Catalog Test Course');
+});
+
+test('standard LMS adapter layer operates cleanly with Infosys Springboard provider and ONEST schema', async () => {
+  // 1. Providers endpoint lists Infosys Springboard
+  const provRes = await request(app).get('/api/v1/lms/providers');
+  assert.equal(provRes.status, 200);
+  assert.ok(Array.isArray(provRes.body.data));
+  const hasInfosys = provRes.body.data.some(p => p.providerId === 'INFOSYS_SPRINGBOARD');
+  assert.ok(hasInfosys, 'Infosys Springboard provider must be registered');
+
+  // 2. Query courses via standard LMS adapter
+  const coursesRes = await request(app).get('/api/v1/lms/courses?provider=INFOSYS_SPRINGBOARD');
+  assert.equal(coursesRes.status, 200);
+  assert.ok(Array.isArray(coursesRes.body.data));
+  assert.ok(coursesRes.body.data.length > 0);
+  const sampleCourse = coursesRes.body.data[0];
+  assert.equal(sampleCourse.provider, 'INFOSYS_SPRINGBOARD');
+  assert.ok(sampleCourse.onestDescriptor);
+  assert.ok(sampleCourse.onestTags);
+  assert.ok(sampleCourse.nsqfLevel);
+
+  // 3. Query course details via standard LMS adapter
+  const detailRes = await request(app).get(`/api/v1/lms/courses/${sampleCourse.id}?provider=INFOSYS_SPRINGBOARD`);
+  assert.equal(detailRes.status, 200);
+  assert.ok(Array.isArray(detailRes.body.data.modules));
+  assert.ok(detailRes.body.data.modules.length > 0);
+
+  // 4. Progress sync via standard LMS adapter
+  const syncProgRes = await request(app)
+    .post('/api/v1/lms/sync/progress')
+    .send({
+      provider: 'INFOSYS_SPRINGBOARD',
+      studentEmail: 'learner@example.com',
+      courseId: sampleCourse.id,
+      progressPercentage: 85,
+      completedModules: 4,
+      totalModules: 5
+    });
+  assert.equal(syncProgRes.status, 200);
+  assert.equal(syncProgRes.body.data.progressPercentage, 85);
+  assert.equal(syncProgRes.body.data.provider, 'INFOSYS_SPRINGBOARD');
+
+  // 5. Certificate sync from Infosys Springboard and HR verification
+  const testCertId = `INFY-TEST-${Date.now().toString().slice(-5)}`;
+  const syncCertRes = await request(app)
+    .post('/api/v1/lms/sync/certificate')
+    .send({
+      provider: 'INFOSYS_SPRINGBOARD',
+      certificateId: testCertId,
+      studentEmail: 'learner@example.com',
+      studentName: 'Maya Chen',
+      courseTitle: sampleCourse.title,
+      score: 95,
+      skills: ['Cloud', 'DevOps', 'CI/CD']
+    });
+  assert.equal(syncCertRes.status, 200);
+  assert.equal(syncCertRes.body.data.certificateId, testCertId);
+
+  // 6. Verify HR verification endpoint immediately resolves the Infosys certificate
+  const hrVerifyRes = await request(app).get(`/api/v1/verify/${testCertId}`);
+  assert.equal(hrVerifyRes.status, 200);
+  assert.equal(hrVerifyRes.body.data.valid, true);
+  assert.equal(hrVerifyRes.body.data.certificateId, testCertId);
+  assert.equal(hrVerifyRes.body.data.issuedBy, 'Infosys Springboard');
+
+  // 7. Email-based learner details lookup
+  const learnerRes = await request(app).get('/api/v1/lms/learner/learner@example.com?provider=INFOSYS_SPRINGBOARD');
+  assert.equal(learnerRes.status, 200);
+  assert.equal(learnerRes.body.success, true);
+  assert.equal(learnerRes.body.data.email, 'learner@example.com');
+  assert.ok(learnerRes.body.data.learnerId);
+  assert.ok(Array.isArray(learnerRes.body.data.enrollments));
+  assert.ok(Array.isArray(learnerRes.body.data.skills));
+  assert.ok(learnerRes.body.data.nsqfCompetencies);
+
+  // 8. Email-based enrollments lookup
+  const enrollRes = await request(app).get('/api/v1/lms/enrollments?email=learner@example.com&provider=INFOSYS_SPRINGBOARD');
+  assert.equal(enrollRes.status, 200);
+  assert.equal(enrollRes.body.success, true);
+  assert.ok(Array.isArray(enrollRes.body.data));
+  assert.ok(enrollRes.body.data.length > 0);
+
+  // 9. Email-based certificates lookup
+  const certRes = await request(app).get('/api/v1/lms/certificates?email=learner@example.com&provider=INFOSYS_SPRINGBOARD');
+  assert.equal(certRes.status, 200);
+  assert.equal(certRes.body.success, true);
+  assert.ok(Array.isArray(certRes.body.data));
 });
 
 

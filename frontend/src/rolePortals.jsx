@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+  import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   AlertTriangle,
@@ -994,19 +994,23 @@ export function AdminUsers() {
               <div>
                 <select
                   value={u.role}
+                  disabled={u.role === 'ADMIN'}
                   onChange={e => updateRole(u.id, e.target.value)}
+                  title={u.role === 'ADMIN' ? 'Sole system administrator account cannot be altered' : 'Modify user role'}
                   style={{
                     height: '34px',
                     borderRadius: '6px',
                     border: '1px solid var(--line)',
                     padding: '0 8px',
-                    fontSize: '12px'
+                    fontSize: '12px',
+                    opacity: u.role === 'ADMIN' ? 0.7 : 1,
+                    cursor: u.role === 'ADMIN' ? 'not-allowed' : 'pointer'
                   }}
                 >
                   <option value="LEARNER">LEARNER</option>
                   <option value="COMPANY">COMPANY</option>
                   <option value="HR">HR</option>
-                  <option value="ADMIN">ADMIN</option>
+                  {u.role === 'ADMIN' && <option value="ADMIN">ADMIN (System Admin)</option>}
                 </select>
               </div>
 
@@ -1020,8 +1024,16 @@ export function AdminUsers() {
                 <button
                   type="button"
                   className="button dark"
-                  style={{ height: '32px', fontSize: '11px', padding: '0 12px' }}
+                  disabled={u.role === 'ADMIN'}
+                  style={{
+                    height: '32px',
+                    fontSize: '11px',
+                    padding: '0 12px',
+                    opacity: u.role === 'ADMIN' ? 0.5 : 1,
+                    cursor: u.role === 'ADMIN' ? 'not-allowed' : 'pointer'
+                  }}
                   onClick={() => toggleStatus(u.id, u.active)}
+                  title={u.role === 'ADMIN' ? 'System administrator cannot be deactivated' : undefined}
                 >
                   {u.active ? 'Deactivate' : 'Activate'}
                 </button>

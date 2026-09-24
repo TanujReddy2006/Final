@@ -10,6 +10,7 @@ import { CertificationEligibilityService } from './services/certificationEligibi
 import { issueCertificate, readCertificatePdf } from './services/certificateService.js';
 import { normalizeModule, validateCourseForPublish } from './services/courseValidationService.js';
 import { getCached, invalidateCached, setCached } from './config/cache.js';
+import lmsRoutes from './routes/lmsRoutes.js';
 
 const app = express();
 
@@ -136,12 +137,26 @@ app.get(['/health', '/healthz', '/api/v1/health'], (_, res) =>
   })
 );
 
+// Standard LMS Adapter Routes (ONEST / Beckn compliant)
+app.use('/api/v1/lms', lmsRoutes);
+
 // Auth endpoints
 app.post('/api/v1/auth/register', async (req, res) => {
   const name = String(req.body.name || '').trim();
   const email = String(req.body.email || '').trim().toLowerCase();
   const password = String(req.body.password || '');
-  const role = ['LEARNER', 'COMPANY', 'HR'].includes(req.body.role) ? req.body.role : 'LEARNER';
+  const requestedRole = String(req.body.role || '').toUpperCase();
+
+  // Strict check: Only one admin exists in the platform. New users cannot register as ADMIN.
+  if (requestedRole === 'ADMIN') {
+    return res.status(403).json({
+      success: false,
+      message: 'Registration as administrator is not permitted. Only one system administrator exists.'
+    });
+  }
+
+  const allowedRoles = ['LEARNER', 'COMPANY', 'HR'];
+  const role = allowedRoles.includes(requestedRole) ? requestedRole : 'LEARNER';
   const companyName = String(req.body.companyName || '').trim();
 
   // Validate Name
@@ -1466,9 +1481,28 @@ app.patch('/api/v1/admin/users/:id', requireAuth, allow('ADMIN'), (req, res) => 
   }
 
   if (req.body.role) {
-    user.role = req.body.role;
+    const targetRole = String(req.body.role).toUpperCase();
+    if (targetRole === 'ADMIN' && user.role !== 'ADMIN') {
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot assign ADMIN role. Only one system administrator is permitted.'
+      });
+    }
+    if (user.role === 'ADMIN' && targetRole !== 'ADMIN') {
+      return res.status(400).json({
+        success: false,
+        message: 'The system administrator role cannot be altered.'
+      });
+    }
+    user.role = targetRole;
   }
   if (typeof req.body.active === 'boolean') {
+    if (user.role === 'ADMIN' && req.body.active === false) {
+      return res.status(400).json({
+        success: false,
+        message: 'The primary system administrator account cannot be deactivated.'
+      });
+    }
     user.active = req.body.active;
   }
 

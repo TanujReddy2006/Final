@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Link, NavLink, useParams, useLocation } from 'react-router-dom';
+import { Link, NavLink, useParams, useLocation, useNavigate } from 'react-router-dom';
 import {
   Award,
   BarChart3,
@@ -35,6 +35,7 @@ import {
   LearnerOverview,
   LearnerProfile
 } from './rolePortals.jsx';
+import { LandingPage } from './LandingPage.jsx';
 
 const demo = {
   learner: ['learner@example.com', 'Maya Chen', 'LEARNER'],
@@ -48,23 +49,63 @@ function App() {
     JSON.parse(localStorage.getItem('learnforge_user') || 'null')
   );
   const [menu, setMenu] = useState(false);
+  const loc = useLocation();
+  const navigate = useNavigate();
 
   const authenticate = async (endpoint, form) => {
     const data = await unwrap(api.post(endpoint, form));
     localStorage.setItem('learnforge_token', data.token);
     localStorage.setItem('learnforge_user', JSON.stringify(data.user));
     setUser(data.user);
+    navigate('/dashboard');
   };
 
   const logout = () => {
     localStorage.clear();
     setUser(null);
+    navigate('/');
   };
 
-  const loc = useLocation();
-  if (loc.pathname === '/verify' || loc.pathname.startsWith('/verify/')) return <Verify />;
-  if (!user) return <Auth onAuthenticate={authenticate} />;
+  // 1. Root "/" MUST open the landing / cover page
+  if (loc.pathname === '/') {
+    return <LandingPage user={user} />;
+  }
 
+  // 2. Public verification routes
+  if (loc.pathname === '/verify' || loc.pathname.startsWith('/verify/')) {
+    return <Verify />;
+  }
+
+  // 3. Dedicated Sign In routes
+  if (loc.pathname === '/signin' || loc.pathname === '/login') {
+    if (user) {
+      return (
+        <Shell user={user} logout={logout} menu={menu} setMenu={setMenu}>
+          <Routes user={user} />
+        </Shell>
+      );
+    }
+    return <Auth onAuthenticate={authenticate} initialRegister={false} />;
+  }
+
+  // 4. Dedicated Registration routes
+  if (loc.pathname === '/register' || loc.pathname === '/signup') {
+    if (user) {
+      return (
+        <Shell user={user} logout={logout} menu={menu} setMenu={setMenu}>
+          <Routes user={user} />
+        </Shell>
+      );
+    }
+    return <Auth onAuthenticate={authenticate} initialRegister={true} />;
+  }
+
+  // 5. Unauthenticated fallback for protected routes
+  if (!user) {
+    return <Auth onAuthenticate={authenticate} initialRegister={false} />;
+  }
+
+  // 6. Authenticated dashboard and workspace routes
   return (
     <Shell user={user} logout={logout} menu={menu} setMenu={setMenu}>
       <Routes user={user} />
@@ -72,17 +113,29 @@ function App() {
   );
 }
 
-function Auth({ onAuthenticate }) {
-  const [register, setRegister] = useState(false);
-  const [form, setForm] = useState({
-    email: 'learner@example.com',
-    password: 'Demo@123',
+function Auth({ onAuthenticate, initialRegister = false }) {
+  const [register, setRegister] = useState(initialRegister);
+  const navigate = useNavigate();
+  const [form, setForm] = useState(() => ({
+    email: initialRegister ? '' : 'learner@example.com',
+    password: initialRegister ? '' : 'Demo@123',
     name: '',
     role: 'LEARNER',
     companyName: ''
-  });
+  }));
   const [fieldErrors, setFieldErrors] = useState({});
   const [serverError, setServerError] = useState('');
+
+  useEffect(() => {
+    setRegister(initialRegister);
+    setFieldErrors({});
+    setServerError('');
+    if (initialRegister) {
+      setForm({ email: '', password: '', name: '', role: 'LEARNER', companyName: '' });
+    } else {
+      setForm({ email: 'learner@example.com', password: 'Demo@123', name: '', role: 'LEARNER', companyName: '' });
+    }
+  }, [initialRegister]);
   const [submitting, setSubmitting] = useState(false);
 
   const validate = () => {
@@ -155,6 +208,7 @@ function Auth({ onAuthenticate }) {
     setRegister(toRegister);
     setFieldErrors({});
     setServerError('');
+    navigate(toRegister ? '/register' : '/signin');
     if (toRegister) {
       // Clear prefilled demo credentials for new registration
       setForm({
@@ -179,9 +233,9 @@ function Auth({ onAuthenticate }) {
   return (
     <main className="auth">
       <section className="auth-art">
-        <div className="brand">
+        <Link to="/" className="brand" style={{ textDecoration: 'none', color: 'inherit' }}>
           <span className="brand-mark">L</span> learnforge
-        </div>
+        </Link>
         <div className="art-copy">
           <p className="eyebrow">THE SKILLS OPERATING SYSTEM</p>
           <h1>
@@ -201,9 +255,9 @@ function Auth({ onAuthenticate }) {
 
       <section className="auth-form">
         <div className="form-inner">
-          <div className="mobile-brand brand">
+          <Link to="/" className="mobile-brand brand" style={{ textDecoration: 'none', color: 'inherit' }}>
             <span className="brand-mark">L</span> learnforge
-          </div>
+          </Link>
           <p className="eyebrow">{register ? 'JOIN THE NETWORK' : 'WELCOME BACK'}</p>
           <h2>{register ? 'Start building your next skill.' : 'Your learning space awaits.'}</h2>
           <p className="muted">
@@ -297,25 +351,27 @@ function Auth({ onAuthenticate }) {
             </button>
           </div>
 
-          <div className="demo-login">
-            <span>Demo access</span>
-            <div>
-              {Object.entries(demo).map(([key, value]) => (
-                <button
-                  type="button"
-                  key={key}
-                  onClick={() => {
-                    setRegister(false);
-                    setFieldErrors({});
-                    setServerError('');
-                    setForm({ ...form, email: value[0], password: 'Demo@123' });
-                  }}
-                >
-                  {key}
-                </button>
-              ))}
+          {!register && (
+            <div className="demo-login">
+              <span>Demo access</span>
+              <div>
+                {Object.entries(demo).map(([key, value]) => (
+                  <button
+                    type="button"
+                    key={key}
+                    onClick={() => {
+                      setRegister(false);
+                      setFieldErrors({});
+                      setServerError('');
+                      setForm({ ...form, email: value[0], password: 'Demo@123' });
+                    }}
+                  >
+                    {key}
+                  </button>
+                ))}
+              </div>
             </div>
-          </div>
+          )}
         </div>
       </section>
     </main>
@@ -362,9 +418,9 @@ function Shell({ user, logout, menu, setMenu, children }) {
   return (
     <div className="app-shell">
       <aside className={menu ? 'sidebar open' : 'sidebar'}>
-        <div className="brand">
+        <Link to="/" className="brand" style={{ textDecoration: 'none', color: 'inherit' }}>
           <span className="brand-mark">L</span> learnforge
-        </div>
+        </Link>
         <div className="workspace">
           <span className="avatar">{user.name?.slice(0, 1)}</span>
           <div>
