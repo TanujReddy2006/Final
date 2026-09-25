@@ -1471,7 +1471,7 @@ app.get('/api/v1/admin/users', requireAuth, allow('ADMIN'), (req, res) => {
   response(res, users);
 });
 
-app.patch('/api/v1/admin/users/:id', requireAuth, allow('ADMIN'), (req, res) => {
+app.patch('/api/v1/admin/users/:id', requireAuth, allow('ADMIN'), async (req, res) => {
   const user = db.users.find(u => u.id === req.params.id);
   if (!user) {
     return res.status(404).json({
@@ -1480,22 +1480,14 @@ app.patch('/api/v1/admin/users/:id', requireAuth, allow('ADMIN'), (req, res) => 
     });
   }
 
-  if (req.body.role) {
-    const targetRole = String(req.body.role).toUpperCase();
-    if (targetRole === 'ADMIN' && user.role !== 'ADMIN') {
-      return res.status(400).json({
-        success: false,
-        message: 'Cannot assign ADMIN role. Only one system administrator is permitted.'
-      });
-    }
-    if (user.role === 'ADMIN' && targetRole !== 'ADMIN') {
-      return res.status(400).json({
-        success: false,
-        message: 'The system administrator role cannot be altered.'
-      });
-    }
-    user.role = targetRole;
+  // Admin cannot change user roles
+  if (req.body.role !== undefined) {
+    return res.status(400).json({
+      success: false,
+      message: 'Admin cannot change user roles. Role modification is disabled.'
+    });
   }
+
   if (typeof req.body.active === 'boolean') {
     if (user.role === 'ADMIN' && req.body.active === false) {
       return res.status(400).json({
@@ -1504,14 +1496,72 @@ app.patch('/api/v1/admin/users/:id', requireAuth, allow('ADMIN'), (req, res) => 
       });
     }
     user.active = req.body.active;
+    await query('UPDATE users SET active = $1 WHERE id = $2', [user.active, user.id]);
+    persistDatabase().catch(err => console.error('Database sync error on status update:', err.message));
   }
 
   audit(req, 'USER_UPDATED', 'USER', user.id, {
-    role: user.role,
     active: user.active
   });
 
   response(res, publicUser(user), 'User updated successfully');
+});
+
+app.delete('/api/v1/admin/users/:id', requireAuth, allow('ADMIN'), async (req, res) => {
+  const userId = req.params.id;
+  const user = db.users.find(u => u.id === userId);
+
+  let targetUser = user;
+  if (!targetUser) {
+    const { rows } = await query('SELECT * FROM users WHERE id = $1', [userId]);
+    if (!rows || rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+    targetUser = rows[0];
+  }
+
+  // Prevent deleting primary admin account
+  if (targetUser.role === 'ADMIN' || targetUser.id === 'u-admin' || targetUser.email === 'admin@example.com') {
+    return res.status(400).json({
+      success: false,
+      message: 'The primary system administrator account cannot be deleted.'
+    });
+  }
+
+  // Require account to be deactivated before deletion
+  if (targetUser.active) {
+    return res.status(400).json({
+      success: false,
+      message: 'Account must be deactivated before it can be deleted.'
+    });
+  }
+
+  // 1. Delete from PostgreSQL database
+  await query('DELETE FROM users WHERE id = $1', [userId]);
+
+  // 2. Delete from in-memory db
+  const userIdx = db.users.findIndex(u => u.id === userId);
+  if (userIdx !== -1) {
+    db.users.splice(userIdx, 1);
+  }
+  db.enrollments = db.enrollments.filter(e => e.userId !== userId);
+  db.attempts = db.attempts.filter(a => a.userId !== userId);
+  db.certificates = db.certificates.filter(c => c.learnerId !== userId);
+  db.notifications = db.notifications.filter(n => n.userId !== userId);
+
+  // 3. Persist changes to database if connected
+  persistDatabase().catch(err => console.error('Database sync error on delete:', err.message));
+
+  audit(req, 'USER_DELETED', 'USER', userId, {
+    email: targetUser.email,
+    name: targetUser.name,
+    role: targetUser.role
+  });
+
+  return response(res, { id: userId }, 'User permanently deleted from database');
 });
 
 app.get('/api/v1/admin/certificates', requireAuth, allow('ADMIN'), (req, res) =>

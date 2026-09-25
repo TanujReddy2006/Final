@@ -254,7 +254,7 @@ test('admin endpoints allow managing users and viewing certificates', async () =
   assert.equal(certsRes.status, 200);
   assert.ok(Array.isArray(certsRes.body.data));
 
-  // Cannot promote another user to ADMIN
+  // Cannot modify user role (admin cannot change user roles)
   const promoteRes = await request(app)
     .patch('/api/v1/admin/users/u-learner')
     .set(adminHeaders)
@@ -267,6 +267,50 @@ test('admin endpoints allow managing users and viewing certificates', async () =
     .set(adminHeaders)
     .send({ active: false });
   assert.equal(deactRes.status, 400);
+
+  // Register a temporary user to test deactivation and permanent deletion
+  const tempEmail = `temp_del_${Date.now()}@example.com`;
+  const tempUserRes = await request(app)
+    .post('/api/v1/auth/register')
+    .send({
+      name: 'Temp Deletion User',
+      email: tempEmail,
+      password: 'Password@123'
+    });
+  assert.equal(tempUserRes.status, 200);
+  const tempUserId = tempUserRes.body.data.user.id;
+
+  // Cannot delete an active account
+  const prematureDelete = await request(app)
+    .delete(`/api/v1/admin/users/${tempUserId}`)
+    .set(adminHeaders);
+  assert.equal(prematureDelete.status, 400);
+
+  // Deactivate the account
+  const deactTemp = await request(app)
+    .patch(`/api/v1/admin/users/${tempUserId}`)
+    .set(adminHeaders)
+    .send({ active: false });
+  assert.equal(deactTemp.status, 200);
+
+  // Delete the deactivated account permanently
+  const deleteRes = await request(app)
+    .delete(`/api/v1/admin/users/${tempUserId}`)
+    .set(adminHeaders);
+  assert.equal(deleteRes.status, 200);
+
+  // Verify user is gone from user list and database
+  const usersAfterDelete = await request(app)
+    .get('/api/v1/admin/users')
+    .set(adminHeaders);
+  const foundDeleted = usersAfterDelete.body.data.find(u => u.id === tempUserId);
+  assert.equal(foundDeleted, undefined);
+
+  // Deleting primary admin account is strictly blocked
+  const deleteAdminRes = await request(app)
+    .delete('/api/v1/admin/users/u-admin')
+    .set(adminHeaders);
+  assert.equal(deleteAdminRes.status, 400);
 });
 
 test('company can view learners enrolled in their courses', async () => {

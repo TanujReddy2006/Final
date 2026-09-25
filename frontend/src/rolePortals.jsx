@@ -925,16 +925,6 @@ export function AdminUsers() {
     load();
   }, []);
 
-  const updateRole = async (userId, newRole) => {
-    try {
-      await unwrap(api.patch(`/admin/users/${userId}`, { role: newRole }));
-      setMessage(`User role updated to ${newRole}`);
-      load();
-    } catch (err) {
-      setMessage(err.response?.data?.message || 'Failed to update user role');
-    }
-  };
-
   const toggleStatus = async (userId, currentActive) => {
     try {
       await unwrap(api.patch(`/admin/users/${userId}`, { active: !currentActive }));
@@ -942,6 +932,19 @@ export function AdminUsers() {
       load();
     } catch (err) {
       setMessage(err.response?.data?.message || 'Failed to update user status');
+    }
+  };
+
+  const deleteUser = async (userId, userName) => {
+    if (!window.confirm(`Permanently delete deactivated user "${userName}"? This cannot be undone and will delete the entry from the database.`)) {
+      return;
+    }
+    try {
+      await unwrap(api.delete(`/admin/users/${userId}`));
+      setMessage(`User "${userName}" was permanently deleted from the database.`);
+      load();
+    } catch (err) {
+      setMessage(err.response?.data?.message || 'Failed to delete user');
     }
   };
 
@@ -954,8 +957,8 @@ export function AdminUsers() {
     <>
       <Title
         eyebrow="ADMIN PORTAL"
-        title="People & Roles"
-        sub="Manage registered users, change permissions, and control account access."
+        title="People & Accounts"
+        sub="Manage registered users and control account access."
       />
 
       <div className="catalog-tools" style={{ marginBottom: '20px' }}>
@@ -992,26 +995,21 @@ export function AdminUsers() {
               </div>
 
               <div>
-                <select
-                  value={u.role}
-                  disabled={u.role === 'ADMIN'}
-                  onChange={e => updateRole(u.id, e.target.value)}
-                  title={u.role === 'ADMIN' ? 'Sole system administrator account cannot be altered' : 'Modify user role'}
+                <span
                   style={{
-                    height: '34px',
-                    borderRadius: '6px',
+                    display: 'inline-block',
+                    padding: '4px 10px',
+                    borderRadius: '5px',
+                    background: 'var(--paper)',
                     border: '1px solid var(--line)',
-                    padding: '0 8px',
-                    fontSize: '12px',
-                    opacity: u.role === 'ADMIN' ? 0.7 : 1,
-                    cursor: u.role === 'ADMIN' ? 'not-allowed' : 'pointer'
+                    fontWeight: 600,
+                    fontSize: '11px',
+                    letterSpacing: '0.4px',
+                    color: 'var(--ink)'
                   }}
                 >
-                  <option value="LEARNER">LEARNER</option>
-                  <option value="COMPANY">COMPANY</option>
-                  <option value="HR">HR</option>
-                  {u.role === 'ADMIN' && <option value="ADMIN">ADMIN (System Admin)</option>}
-                </select>
+                  {u.role === 'ADMIN' ? 'ADMIN (System Admin)' : u.role}
+                </span>
               </div>
 
               <div>
@@ -1020,7 +1018,7 @@ export function AdminUsers() {
                 </span>
               </div>
 
-              <div>
+              <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
                 <button
                   type="button"
                   className="button dark"
@@ -1037,6 +1035,28 @@ export function AdminUsers() {
                 >
                   {u.active ? 'Deactivate' : 'Activate'}
                 </button>
+
+                {!u.active && u.role !== 'ADMIN' && (
+                  <button
+                    type="button"
+                    className="button"
+                    style={{
+                      height: '32px',
+                      fontSize: '11px',
+                      padding: '0 12px',
+                      background: '#fff0ee',
+                      color: '#b64c39',
+                      border: '1px solid #ffd5cf',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '4px'
+                    }}
+                    onClick={() => deleteUser(u.id, u.name)}
+                    title="Permanently delete deactivated account from database"
+                  >
+                    <Trash2 size={12} /> Delete
+                  </button>
+                )}
               </div>
             </div>
           ))
