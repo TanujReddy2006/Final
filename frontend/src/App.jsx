@@ -23,7 +23,6 @@ import {
   X
 } from 'lucide-react';
 import { api, unwrap } from './services/api';
-import { CompanyStudio, CoursePlayer, FinalAssessment } from './portalFeatures.jsx';
 import { CompanyCourseBuilder } from './courseBuilder.jsx';
 import { LearnerPlayer } from './learnerPlayer.jsx';
 import {
@@ -934,11 +933,22 @@ function MyCourses() {
         title="Your courses."
         sub="Keep your momentum. Every completed module counts."
       />
-      <div className="course-grid">
-        {items.map(e => (
-          <CourseCard key={e.id} course={e.course} progress={e.progress} />
-        ))}
-      </div>
+      {items.length ? (
+        <div className="course-grid">
+          {items.map(e => (
+            <CourseCard key={e.id} course={e.course} progress={e.progress} />
+          ))}
+        </div>
+      ) : (
+        <div className="empty-state">
+          <BookOpen size={40} />
+          <h2>No enrolled courses yet.</h2>
+          <p className="muted">Browse the course catalog and enroll to start your learning journey.</p>
+          <Link to="/courses" className="button dark" style={{ marginTop: '12px' }}>
+            Explore courses
+          </Link>
+        </div>
+      )}
     </>
   );
 }

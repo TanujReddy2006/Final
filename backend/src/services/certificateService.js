@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import QRCode from 'qrcode';
-import { db, id, now } from '../config/database.js';
+import { db, query, id, now, mapCertificate } from '../config/database.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const certificateDir = path.resolve(__dirname, '..', '..', 'storage', 'certificates');
@@ -85,24 +85,33 @@ function createCertificatePdf(certificate, course) {
 }
 
 export async function issueCertificate({ user, course, score = 0 }) {
-  const existing = db.certificates.find(
-    certificate => certificate.courseId === course.id && certificate.learnerId === user.id
+  const { rows: existingRows } = await query(
+    'SELECT * FROM certificates WHERE course_id = $1 AND learner_id = $2',
+    [course.id, user.id]
   );
 
-  if (existing) {
+  if (existingRows.length > 0) {
+    const existing = mapCertificate(existingRows[0]);
     if (score > existing.score) {
       existing.score = score;
+      await query('UPDATE certificates SET score = $1 WHERE id = $2', [score, existing.id]);
       await fs.mkdir(certificateDir, { recursive: true });
       await fs.writeFile(pdfPath(existing.certificateId), createCertificatePdf(existing, course));
     }
+    const idx = (db.certificates || []).findIndex(c => c.id === existing.id);
+    if (idx >= 0) db.certificates[idx] = existing;
     return existing;
   }
 
   const certificateId = `CERT-${new Date().getFullYear()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+  const certCountRes = await query('SELECT COUNT(*) AS count FROM certificates');
+  const certSeq = parseInt(certCountRes.rows[0]?.count || 0, 10) + 1;
+  const certificateNumber = `CERT-${new Date().getFullYear()}-${String(certSeq).padStart(4, '0')}`;
+
   const certificate = {
     id: id(),
     certificateId,
-    certificateNumber: `CERT-${new Date().getFullYear()}-${String(db.certificates.length + 1).padStart(4, '0')}`,
+    certificateNumber,
     learnerName: user.name,
     learnerId: user.id,
     certification: `${course.title} Certificate`,
@@ -120,8 +129,36 @@ export async function issueCertificate({ user, course, score = 0 }) {
     courseId: course.id
   };
 
+  await query(
+    `INSERT INTO certificates (
+       id, certificate_id, certificate_number, learner_id, learner_name, course_id, course_name,
+       certification, issued_by, score, completion_date, issued_date, expiry_date,
+       verification_url, pdf_url, status, skills
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
+    [
+      certificate.id,
+      certificate.certificateId,
+      certificate.certificateNumber,
+      certificate.learnerId,
+      certificate.learnerName,
+      certificate.courseId,
+      certificate.courseName,
+      certificate.certification,
+      certificate.issuedBy,
+      certificate.score,
+      certificate.completionDate,
+      certificate.issuedDate,
+      certificate.expiryDate,
+      certificate.verificationUrl,
+      certificate.pdfUrl,
+      certificate.status,
+      JSON.stringify(certificate.skills || [])
+    ]
+  );
+
   await fs.mkdir(certificateDir, { recursive: true });
   await fs.writeFile(pdfPath(certificateId), createCertificatePdf(certificate, course));
+  db.certificates = db.certificates || [];
   db.certificates.push(certificate);
 
   return certificate;
@@ -132,17 +169,21 @@ export async function readCertificatePdf(certificateId) {
     return await fs.readFile(pdfPath(certificateId));
   } catch (error) {
     // Self-healing: if file is not on disk (e.g. after container restart), regenerate it!
-    const query = String(certificateId || '').trim().toLowerCase();
-    const certificate = db.certificates.find(item => {
-      const certId = String(item.certificateId || '').trim().toLowerCase();
-      const certNum = String(item.certificateNumber || '').trim().toLowerCase();
-      const idVal = String(item.id || '').trim().toLowerCase();
-      return certId === query || certNum === query || idVal === query;
-    });
+    const queryStr = String(certificateId || '').trim().toLowerCase();
+    const { rows } = await query(
+      `SELECT c.*, crs.title as crs_title
+       FROM certificates c
+       LEFT JOIN courses crs ON c.course_id = crs.id
+       WHERE LOWER(c.certificate_id) = LOWER($1)
+          OR LOWER(c.certificate_number) = LOWER($1)
+          OR LOWER(c.id) = LOWER($1)`,
+      [queryStr]
+    );
 
-    if (certificate) {
-      const course = db.courses.find(c => c.id === certificate.courseId) || {
-        title: certificate.courseName || certificate.certification || 'Certified Course'
+    if (rows && rows.length > 0) {
+      const certificate = mapCertificate(rows[0]);
+      const course = {
+        title: rows[0].crs_title || certificate.courseName || certificate.certification || 'Certified Course'
       };
       const pdfBuffer = createCertificatePdf(certificate, course);
       try {

@@ -2,7 +2,31 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
 import app from '../src/app.js';
-import { db } from '../src/config/database.js';
+import { db, query } from '../src/config/database.js';
+
+test.before(async () => {
+  await query('DELETE FROM certificates');
+  await query('DELETE FROM attempts');
+  await query('DELETE FROM enrollments');
+  await query('DELETE FROM assessments');
+  await query('DELETE FROM courses');
+  await query('DELETE FROM verifications');
+  await query('DELETE FROM audit_logs');
+  await query('DELETE FROM pending_company_registrations');
+  await query("UPDATE users SET name = 'Maya Chen' WHERE id = 'u-learner'");
+  await query("DELETE FROM users WHERE id NOT IN ('u-learner', 'u-company', 'u-hr', 'u-admin')");
+  await query("DELETE FROM companies WHERE id != 'co-techcorp'");
+  db.courses = [];
+  db.certificates = [];
+  db.enrollments = [];
+  db.attempts = [];
+  db.assessments = [];
+  db.verifications = [];
+  db.auditLogs = [];
+  db.pendingCompanyRegistrations = [];
+  const maya = (db.users || []).find(u => u.id === 'u-learner');
+  if (maya) maya.name = 'Maya Chen';
+});
 
 test('health and demo login work', async () => {
   const health = await request(app).get('/api/v1/health');
@@ -895,6 +919,20 @@ test('company registration requires admin approval before details enter database
   });
   assert.equal(hrLoginSuccess.status, 200);
   assert.equal(hrLoginSuccess.body.data.user.role, 'HR');
+});
+
+test.after(async () => {
+  await query('DELETE FROM certificates');
+  await query('DELETE FROM attempts');
+  await query('DELETE FROM enrollments');
+  await query('DELETE FROM assessments');
+  await query('DELETE FROM courses');
+  await query('DELETE FROM verifications');
+  await query('DELETE FROM audit_logs');
+  await query('DELETE FROM pending_company_registrations');
+  await query("UPDATE users SET name = 'Maya Chen' WHERE id = 'u-learner'");
+  await query("DELETE FROM users WHERE id NOT IN ('u-learner', 'u-company', 'u-hr', 'u-admin')");
+  await query("DELETE FROM companies WHERE id != 'co-techcorp'");
 });
 
 

@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
+import { api, unwrap } from './services/api';
 import {
   Award,
   BookOpen,
@@ -19,6 +20,17 @@ import './landing.css';
 
 export function LandingPage({ user }) {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [featuredCourse, setFeaturedCourse] = useState(null);
+
+  useEffect(() => {
+    unwrap(api.get('/courses'))
+      .then(courses => {
+        if (courses && courses.length > 0) {
+          setFeaturedCourse(courses[0]);
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   const handleNavClick = (e, targetId) => {
     if (targetId.startsWith('#')) {
@@ -194,19 +206,19 @@ export function LandingPage({ user }) {
               <div style={{ fontSize: '10px', textTransform: 'uppercase', letterSpacing: '1.2px', color: '#97bbb0' }}>
                 PROFESSIONAL CERTIFICATION
               </div>
-              <h4>Full Stack Cloud & DevOps Engineering</h4>
+              <h4>{featuredCourse?.title || 'Corporate Certification Program'}</h4>
               <p style={{ fontSize: '12px', color: '#bed2cb', margin: '4px 0 0' }}>
-                Issued to <strong style={{ color: '#fff' }}>Maya Chen</strong> &bull; Score: <strong style={{ color: '#fff' }}>95%</strong>
+                {featuredCourse?.description || 'Industry-recognized verifiable credential issued upon completion.'}
               </p>
 
               <div className="hero-cert-meta">
                 <div>
                   ISSUING ACADEMY
-                  <strong>Infosys Springboard</strong>
+                  <strong>{featuredCourse?.company?.name || featuredCourse?.instructorName || 'Certified Enterprise Provider'}</strong>
                 </div>
                 <div>
-                  QUALIFICATION LEVEL
-                  <strong>NSQF Level 6 &bull; SFIA 3</strong>
+                  CATEGORY
+                  <strong>{featuredCourse?.category || 'Professional Skills'} &bull; {featuredCourse?.difficulty || 'Standard'}</strong>
                 </div>
               </div>
             </div>

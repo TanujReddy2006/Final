@@ -7,7 +7,7 @@
 
 import { Router } from 'express';
 import { lmsRegistry } from '../adapters/LmsRegistry.js';
-import { db, id, now, persistDatabase } from '../config/database.js';
+import { db, query, id, now } from '../config/database.js';
 import { requireAuth } from '../middleware/auth.js';
 
 const router = Router();
@@ -255,15 +255,11 @@ router.post('/sync/certificate', async (req, res) => {
 
     const standardCert = await adapter.syncCertificate(req.body);
 
-    // Synchronize into LearnForge certificates table for seamless HR verification
-    const existingIndex = db.certificates.findIndex(
-      c => c.certificateId.toLowerCase() === standardCert.certificateId.toLowerCase()
-    );
-
-    const learnforgeCertRecord = {
+    const certNumber = standardCert.certificateNumber || standardCert.certificateId;
+    const certRecord = {
       id: id(),
       certificateId: standardCert.certificateId,
-      certificateNumber: standardCert.certificateNumber,
+      certificateNumber: certNumber,
       learnerId: standardCert.learnerId,
       learnerName: standardCert.learnerName,
       courseId: standardCert.courseId,
@@ -271,24 +267,83 @@ router.post('/sync/certificate', async (req, res) => {
       certification: `${standardCert.courseName} Certification`,
       issuedBy: standardCert.issuedBy,
       score: standardCert.score,
-      completionDate: standardCert.issuedDate,
-      issuedDate: standardCert.issuedDate,
+      completionDate: standardCert.issuedDate || now(),
+      issuedDate: standardCert.issuedDate || now(),
       verificationUrl: standardCert.verificationUrl,
       pdfUrl: standardCert.pdfUrl,
-      status: standardCert.status,
-      skills: standardCert.skills
+      status: standardCert.status || 'VALID',
+      skills: standardCert.skills || []
     };
 
-    if (existingIndex >= 0) {
-      db.certificates[existingIndex] = {
-        ...db.certificates[existingIndex],
-        ...learnforgeCertRecord
-      };
-    } else {
-      db.certificates.push(learnforgeCertRecord);
+    let actualCourseId = certRecord.courseId;
+    const { rows: courseRows } = await query('SELECT id FROM courses WHERE id = $1', [actualCourseId]);
+    if (!courseRows.length) {
+      const compId = 'co-infosys';
+      await query(
+        `INSERT INTO companies (id, name, description, website) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING`,
+        [compId, certRecord.issuedBy || 'Infosys Springboard', 'LMS Provider', 'https://springboard.infosys.com']
+      );
+      await query(
+        `INSERT INTO courses (id, title, description, company_id, status) VALUES ($1, $2, $3, $4, 'PUBLISHED') ON CONFLICT (id) DO NOTHING`,
+        [actualCourseId, certRecord.courseName, `${certRecord.courseName} by ${certRecord.issuedBy}`, compId]
+      );
     }
 
-    await persistDatabase().catch(e => console.warn(`Persistence notice: ${e.message}`));
+    let actualLearnerId = certRecord.learnerId;
+    const { rows: userRows } = await query(
+      'SELECT id FROM users WHERE id = $1 OR LOWER(email) = LOWER($2)',
+      [actualLearnerId, standardCert.learnerEmail || '']
+    );
+    if (userRows.length) {
+      actualLearnerId = userRows[0].id;
+    } else {
+      await query(
+        `INSERT INTO users (id, name, email, password_hash, role) VALUES ($1, $2, $3, 'external', 'LEARNER') ON CONFLICT (id) DO NOTHING`,
+        [actualLearnerId, certRecord.learnerName, standardCert.learnerEmail || `${actualLearnerId}@example.com`]
+      );
+    }
+    certRecord.learnerId = actualLearnerId;
+
+    await query(
+      `INSERT INTO certificates (
+         id, certificate_id, certificate_number, learner_id, learner_name, course_id, course_name,
+         certification, issued_by, score, completion_date, issued_date, verification_url, pdf_url, status, skills
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+       ON CONFLICT (certificate_id) DO UPDATE SET
+         score = EXCLUDED.score,
+         status = EXCLUDED.status,
+         skills = EXCLUDED.skills,
+         verification_url = EXCLUDED.verification_url,
+         pdf_url = EXCLUDED.pdf_url`,
+      [
+        certRecord.id,
+        certRecord.certificateId,
+        certRecord.certificateNumber,
+        certRecord.learnerId,
+        certRecord.learnerName,
+        certRecord.courseId,
+        certRecord.courseName,
+        certRecord.certification,
+        certRecord.issuedBy,
+        certRecord.score,
+        certRecord.completionDate,
+        certRecord.issuedDate,
+        certRecord.verificationUrl,
+        certRecord.pdfUrl,
+        certRecord.status,
+        JSON.stringify(certRecord.skills)
+      ]
+    );
+
+    db.certificates = db.certificates || [];
+    const existingIndex = db.certificates.findIndex(
+      c => c.certificateId.toLowerCase() === standardCert.certificateId.toLowerCase()
+    );
+    if (existingIndex >= 0) {
+      db.certificates[existingIndex] = { ...db.certificates[existingIndex], ...certRecord };
+    } else {
+      db.certificates.push(certRecord);
+    }
 
     return res.json({
       success: true,

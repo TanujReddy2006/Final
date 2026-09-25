@@ -4,7 +4,23 @@ import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import bcrypt from 'bcryptjs';
-import { db, query, id, now, persistDatabase, isDatabaseConnected, mapCourse } from './config/database.js';
+import {
+  query,
+  id,
+  now,
+  mapUser,
+  mapCompany,
+  mapCourse,
+  mapEnrollment,
+  mapAssessment,
+  mapAttempt,
+  mapCertificate,
+  mapAuditLog,
+  mapPendingCompany,
+  mapNotification,
+  mapVerification,
+  db
+} from './config/database.js';
 import { allow, publicUser, requireAuth, signToken } from './middleware/auth.js';
 import { CertificationEligibilityService } from './services/certificationEligibilityService.js';
 import { issueCertificate, readCertificatePdf } from './services/certificateService.js';
@@ -65,15 +81,6 @@ app.use(
   })
 );
 
-app.use((req, res, next) => {
-  res.on('finish', () => {
-    persistDatabase().catch(error =>
-      console.warn(`Could not persist request changes: ${error.message}`)
-    );
-  });
-  next();
-});
-
 const response = (res, data, message = '') =>
   res.json({
     success: true,
@@ -83,19 +90,23 @@ const response = (res, data, message = '') =>
 
 const audit = async (req, action, entityType, entityId, metadata = {}) => {
   const actorId = req?.user?.id || metadata?.actorId || null;
-  const actorFromDb = actorId ? db.users.find(u => u.id === actorId) : null;
-  const userName =
-    metadata?.userName ||
-    req?.user?.name ||
-    actorFromDb?.name ||
-    (action === 'REGISTER' && metadata?.name) ||
-    'System';
-  const userRole =
-    metadata?.userRole ||
-    metadata?.role ||
-    req?.user?.role ||
-    actorFromDb?.role ||
-    'SYSTEM';
+  let userName = metadata?.userName || req?.user?.name;
+  let userRole = metadata?.userRole || metadata?.role || req?.user?.role;
+
+  if (actorId && (!userName || !userRole)) {
+    try {
+      const { rows } = await query('SELECT name, role FROM users WHERE id = $1', [actorId]);
+      if (rows && rows.length > 0) {
+        userName = userName || rows[0].name;
+        userRole = userRole || rows[0].role;
+      }
+    } catch {
+      // fallback handled below
+    }
+  }
+
+  userName = userName || (action === 'REGISTER' && metadata?.name) || 'System';
+  userRole = userRole || 'SYSTEM';
 
   const enrichedMetadata = {
     ...metadata,
@@ -140,10 +151,21 @@ const audit = async (req, action, entityType, entityId, metadata = {}) => {
 };
 
 const notify = async (userId, title, body) => {
+  const notification = {
+    id: id(),
+    userId,
+    title,
+    body,
+    read: false,
+    createdAt: now()
+  };
+  db.notifications = db.notifications || [];
+  db.notifications.push(notification);
+
   await query(
     `INSERT INTO notifications (id, user_id, title, body, read, created_at)
      VALUES ($1, $2, $3, $4, false, now())`,
-    [id(), userId, title, body]
+    [notification.id, userId, title, body]
   );
 };
 
@@ -161,11 +183,6 @@ const ensureCourseIds = course => {
   });
   return course;
 };
-
-const courseWithCompany = course => ({
-  ...ensureCourseIds(course),
-  company: db.companies.find(company => company.id === course.companyId)
-});
 
 // Health check endpoints for Render, uptime monitors, and tests
 app.get(['/health', '/healthz', '/api/v1/health'], (_, res) =>
@@ -245,28 +262,27 @@ app.post('/api/v1/auth/register', async (req, res) => {
     });
   }
 
-  // Check email uniqueness across PostgreSQL and db.users
-  const existingEmailInDb = db.users.some(u => u.email && u.email.toLowerCase() === email);
-  const { rows: existingEmailRows } = await query('SELECT id FROM users WHERE LOWER(email) = LOWER($1)', [email]);
-  if (existingEmailInDb || existingEmailRows.length > 0) {
+  // Check email uniqueness directly in PostgreSQL users table
+  const { rows: existingEmailRows } = await query(
+    'SELECT id FROM users WHERE LOWER(email) = LOWER($1)',
+    [email]
+  );
+  if (existingEmailRows.length > 0) {
     return res.status(409).json({
       success: false,
       message: 'Email already registered'
     });
   }
 
-  // Check email uniqueness against pending company registrations
-  const existingPendingInDb = (db.pendingCompanyRegistrations || []).some(
-    p => p.email && p.email.toLowerCase() === email
-  );
+  // Check email uniqueness against pending registrations table
   const { rows: existingPendingRows } = await query(
-    'SELECT id FROM pending_company_registrations WHERE LOWER(email) = LOWER($1)',
+    "SELECT id FROM pending_company_registrations WHERE LOWER(email) = LOWER($1) AND status = 'PENDING'",
     [email]
   );
-  if (existingPendingInDb || existingPendingRows.length > 0) {
+  if (existingPendingRows.length > 0) {
     return res.status(409).json({
       success: false,
-      message: 'A company registration request with this email is already awaiting administrator approval.'
+      message: 'A registration request with this email is already awaiting administrator approval.'
     });
   }
 
@@ -283,17 +299,16 @@ app.post('/api/v1/auth/register', async (req, res) => {
       createdAt: now()
     };
 
-    db.pendingCompanyRegistrations = db.pendingCompanyRegistrations || [];
-    db.pendingCompanyRegistrations.push(pending);
-
     await query(
       `INSERT INTO pending_company_registrations (id, name, email, password_hash, company_name, role, status, created_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, now())`,
       [pending.id, pending.name, pending.email, pending.passwordHash, pending.companyName, pending.role, pending.status]
     );
-    persistDatabase().catch(err => console.error('Database sync error on registration:', err.message));
 
-    audit(req, `${role}_REGISTRATION_PENDING`, 'REGISTRATION_PENDING', pending.id, {
+    db.pendingCompanyRegistrations = db.pendingCompanyRegistrations || [];
+    db.pendingCompanyRegistrations.push(pending);
+
+    await audit(req, `${role}_REGISTRATION_PENDING`, 'REGISTRATION_PENDING', pending.id, {
       userName: pending.name,
       userRole: role,
       companyName: pending.companyName,
@@ -328,13 +343,15 @@ app.post('/api/v1/auth/register', async (req, res) => {
   };
 
   await query(
-    `INSERT INTO users (id, name, email, password_hash, role, company_id, active) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+    `INSERT INTO users (id, name, email, password_hash, role, company_id, active, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, now())`,
     [user.id, user.name, user.email, user.passwordHash, user.role, user.companyId, user.active]
   );
-  db.users.push(user);
-  persistDatabase().catch(err => console.error('PostgreSQL persistence error:', err.message));
 
-  audit(req, 'REGISTER', 'USER', user.id, {
+  db.users = db.users || [];
+  db.users.push(user);
+
+  await audit(req, 'REGISTER', 'USER', user.id, {
     userName: user.name,
     userRole: user.role,
     email: user.email
@@ -360,11 +377,13 @@ app.post('/api/v1/auth/login', async (req, res) => {
     });
   }
 
-  // Check if user registration is pending approval (COMPANY or HR)
-  const pendingComp = (db.pendingCompanyRegistrations || []).find(
-    p => p.email && p.email.toLowerCase() === email
+  // Check if user registration is pending approval in PostgreSQL
+  const { rows: pendingRows } = await query(
+    "SELECT * FROM pending_company_registrations WHERE LOWER(email) = LOWER($1) AND status = 'PENDING'",
+    [email]
   );
-  if (pendingComp) {
+  if (pendingRows.length > 0) {
+    const pendingComp = pendingRows[0];
     const roleLabel = pendingComp.role === 'HR' ? 'HR / employer' : 'company';
     return res.status(403).json({
       success: false,
@@ -372,18 +391,29 @@ app.post('/api/v1/auth/login', async (req, res) => {
     });
   }
 
-  const user = db.users.find(u => u.email && u.email.toLowerCase() === email);
-  if (!user || !user.active || !(await bcrypt.compare(password, user.passwordHash))) {
+  // Query user directly from PostgreSQL users table
+  const { rows: userRows } = await query('SELECT * FROM users WHERE LOWER(email) = LOWER($1)', [email]);
+  if (!userRows.length) {
     return res.status(401).json({
       success: false,
       message: 'Invalid credentials'
     });
   }
-  audit(req, 'LOGIN', 'USER', user.id, {
+
+  const user = mapUser(userRows[0]);
+  if (!user.active || !(await bcrypt.compare(password, user.passwordHash))) {
+    return res.status(401).json({
+      success: false,
+      message: 'Invalid credentials'
+    });
+  }
+
+  await audit(req, 'LOGIN', 'USER', user.id, {
     userName: user.name,
     userRole: user.role,
     email: user.email
   });
+
   return response(
     res,
     {
@@ -394,32 +424,24 @@ app.post('/api/v1/auth/login', async (req, res) => {
   );
 });
 
-app.post('/api/v1/auth/logout', requireAuth, (req, res) => {
-  audit(req, 'LOGOUT', 'USER', req.user.id);
+app.post('/api/v1/auth/logout', requireAuth, async (req, res) => {
+  await audit(req, 'LOGOUT', 'USER', req.user.id);
   response(res, null, 'Logged out');
 });
 
-app.get('/api/v1/auth/me', requireAuth, (req, res) => {
-  const user = db.users.find(u => u.id === req.user.id);
-  if (!user) {
+app.get('/api/v1/auth/me', requireAuth, async (req, res) => {
+  const { rows } = await query('SELECT * FROM users WHERE id = $1', [req.user.id]);
+  if (!rows.length) {
     return res.status(404).json({
       success: false,
       message: 'User not found'
     });
   }
-  return response(res, publicUser(user));
+  return response(res, publicUser(mapUser(rows[0])));
 });
 
 app.patch('/api/v1/users/me', requireAuth, async (req, res) => {
   const userId = req.user.id;
-  const user = db.users.find(u => u.id === userId);
-  if (!user) {
-    return res.status(404).json({
-      success: false,
-      message: 'User not found'
-    });
-  }
-
   const rawName = req.body.name;
   if (!rawName || typeof rawName !== 'string' || rawName.trim().length < 2) {
     return res.status(400).json({
@@ -429,11 +451,19 @@ app.patch('/api/v1/users/me', requireAuth, async (req, res) => {
   }
 
   const name = rawName.trim();
-  user.name = name;
-  await query('UPDATE users SET name = $1 WHERE id = $2', [name, userId]);
-  await persistDatabase().catch(err => console.error('PostgreSQL persistence error:', err.message));
+  const { rows } = await query('UPDATE users SET name = $1 WHERE id = $2 RETURNING *', [name, userId]);
+  if (!rows.length) {
+    return res.status(404).json({
+      success: false,
+      message: 'User not found'
+    });
+  }
 
-  audit(req, 'NAME_UPDATED', 'USER', userId, { name });
+  const user = mapUser(rows[0]);
+  const memUser = (db.users || []).find(u => u.id === userId);
+  if (memUser) memUser.name = name;
+
+  await audit(req, 'NAME_UPDATED', 'USER', userId, { name });
   return response(res, { user: publicUser(user) }, 'Profile updated successfully');
 });
 
@@ -449,134 +479,217 @@ app.post('/api/v1/auth/reset-password', (_, res) =>
 app.get('/api/v1/courses', async (req, res) => {
   const search = String(req.query.search || '').toLowerCase();
 
-  // Combine PostgreSQL rows with db.courses so changes (like publishing) are immediately visible
-  const memPublished = db.courses.filter(c => c.status === 'PUBLISHED');
-  const courseMap = new Map();
+  const { rows } = await query(
+    `SELECT c.*, comp.name AS comp_name, comp.description AS comp_desc, comp.website AS comp_web
+     FROM courses c
+     LEFT JOIN companies comp ON c.company_id = comp.id
+     WHERE c.status = 'PUBLISHED'
+     ORDER BY c.created_at DESC`
+  );
 
-  if (isDatabaseConnected()) {
-    try {
-      const { rows } = await query('SELECT * FROM courses WHERE status = $1', ['PUBLISHED']);
-      if (rows && rows.length > 0) {
-        for (const row of rows) {
-          const c = mapCourse(row);
-          courseMap.set(c.id, c);
+  let list = rows.map(r => {
+    const c = mapCourse(r);
+    ensureCourseIds(c);
+    c.company = r.comp_name
+      ? {
+          id: r.company_id,
+          name: r.comp_name,
+          description: r.comp_desc || '',
+          website: r.comp_web || ''
         }
-      }
-    } catch (err) {
-      console.warn('PostgreSQL courses query failed:', err.message);
-    }
-  }
+      : null;
+    return c;
+  });
 
-  // In-memory has latest edits/publishes from current server session
-  for (const c of memPublished) {
-    courseMap.set(c.id, c);
-  }
-
-  let list = Array.from(courseMap.values());
   if (search) {
     list = list.filter(c =>
       `${c.title} ${c.description} ${c.category} ${c.instructorName}`.toLowerCase().includes(search)
     );
   }
 
-  response(res, list.map(courseWithCompany));
+  return response(res, list);
 });
 
 app.get('/api/v1/courses/:id', async (req, res) => {
-  let course = db.courses.find(c => c.id === req.params.id);
-  if ((!course || course.status !== 'PUBLISHED') && isDatabaseConnected()) {
-    try {
-      const { rows } = await query('SELECT * FROM courses WHERE id = $1', [req.params.id]);
-      if (rows && rows.length > 0) {
-        course = mapCourse(rows[0]);
-      }
-    } catch (err) {
-      console.warn('PostgreSQL course by id query failed:', err.message);
-    }
-  }
+  const { rows } = await query(
+    `SELECT c.*, comp.name AS comp_name, comp.description AS comp_desc, comp.website AS comp_web
+     FROM courses c
+     LEFT JOIN companies comp ON c.company_id = comp.id
+     WHERE c.id = $1 AND c.status = 'PUBLISHED'`,
+    [req.params.id]
+  );
 
-  if (!course || course.status !== 'PUBLISHED') {
+  if (!rows.length) {
     return res.status(404).json({
       success: false,
       message: 'Published course not found'
     });
   }
-  response(res, courseWithCompany(course));
+
+  const course = mapCourse(rows[0]);
+  ensureCourseIds(course);
+  course.company = rows[0].comp_name
+    ? {
+        id: rows[0].company_id,
+        name: rows[0].comp_name,
+        description: rows[0].comp_desc || '',
+        website: rows[0].comp_web || ''
+      }
+    : null;
+
+  return response(res, course);
 });
 
 // Company course endpoints
-app.get('/api/v1/company/courses', requireAuth, allow('COMPANY'), (req, res) =>
-  response(
-    res,
-    db.courses.filter(course => course.companyId === req.user.companyId).map(courseWithCompany)
-  )
-);
+app.get('/api/v1/company/courses', requireAuth, allow('COMPANY'), async (req, res) => {
+  const { rows } = await query(
+    `SELECT c.*, comp.name AS comp_name, comp.description AS comp_desc, comp.website AS comp_web
+     FROM courses c
+     LEFT JOIN companies comp ON c.company_id = comp.id
+     WHERE c.company_id = $1
+     ORDER BY c.created_at DESC`,
+    [req.user.companyId]
+  );
 
-app.get('/api/v1/company/courses/:id', requireAuth, allow('COMPANY'), (req, res) => {
-  const course = db.courses.find(item => item.id === req.params.id);
-  if (!course || !ownsCourse(req, course)) {
+  const list = rows.map(r => {
+    const c = mapCourse(r);
+    ensureCourseIds(c);
+    c.company = r.comp_name
+      ? {
+          id: r.company_id,
+          name: r.comp_name,
+          description: r.comp_desc || '',
+          website: r.comp_web || ''
+        }
+      : null;
+    return c;
+  });
+
+  return response(res, list);
+});
+
+app.get('/api/v1/company/courses/:id', requireAuth, allow('COMPANY'), async (req, res) => {
+  const { rows } = await query(
+    `SELECT c.*, comp.name AS comp_name, comp.description AS comp_desc, comp.website AS comp_web
+     FROM courses c
+     LEFT JOIN companies comp ON c.company_id = comp.id
+     WHERE c.id = $1`,
+    [req.params.id]
+  );
+
+  if (!rows.length) {
     return res.status(404).json({
       success: false,
       message: 'Owned course not found'
     });
   }
-  response(res, courseWithCompany(course));
+
+  const course = mapCourse(rows[0]);
+  if (!ownsCourse(req, course)) {
+    return res.status(404).json({
+      success: false,
+      message: 'Owned course not found'
+    });
+  }
+
+  ensureCourseIds(course);
+  course.company = rows[0].comp_name
+    ? {
+        id: rows[0].company_id,
+        name: rows[0].comp_name,
+        description: rows[0].comp_desc || '',
+        website: rows[0].comp_web || ''
+      }
+    : null;
+
+  return response(res, course);
 });
 
-app.get('/api/v1/company/overview', requireAuth, allow('COMPANY'), (req, res) => {
-  const courses = db.courses.filter(course => course.companyId === req.user.companyId);
-  const courseIds = new Set(courses.map(course => course.id));
-  const enrollments = db.enrollments.filter(enrollment => courseIds.has(enrollment.courseId));
+app.get('/api/v1/company/overview', requireAuth, allow('COMPANY'), async (req, res) => {
+  const [coursesRes, enrollmentsRes] = await Promise.all([
+    query(
+      `SELECT c.*, comp.name AS comp_name, comp.description AS comp_desc, comp.website AS comp_web
+       FROM courses c
+       LEFT JOIN companies comp ON c.company_id = comp.id
+       WHERE c.company_id = $1
+       ORDER BY c.created_at DESC`,
+      [req.user.companyId]
+    ),
+    query(
+      `SELECT e.*
+       FROM enrollments e
+       JOIN courses c ON e.course_id = c.id
+       WHERE c.company_id = $1`,
+      [req.user.companyId]
+    )
+  ]);
 
-  response(res, {
-    courses: courses.map(courseWithCompany),
+  const courses = coursesRes.rows.map(r => {
+    const c = mapCourse(r);
+    ensureCourseIds(c);
+    c.company = r.comp_name
+      ? {
+          id: r.company_id,
+          name: r.comp_name,
+          description: r.comp_desc || '',
+          website: r.comp_web || ''
+        }
+      : null;
+    return c;
+  });
+
+  const enrollments = enrollmentsRes.rows.map(mapEnrollment);
+
+  return response(res, {
+    courses,
     metrics: {
       totalCourses: courses.length,
-      publishedCourses: courses.filter(course => course.status === 'PUBLISHED').length,
-      draftCourses: courses.filter(course => course.status === 'DRAFT').length,
-      totalLearners: new Set(enrollments.map(enrollment => enrollment.userId)).size,
+      publishedCourses: courses.filter(c => c.status === 'PUBLISHED').length,
+      draftCourses: courses.filter(c => c.status === 'DRAFT').length,
+      totalLearners: new Set(enrollments.map(e => e.userId)).size,
       completionRate: enrollments.length
         ? Math.round(
-            (enrollments.filter(enrollment => enrollment.status === 'COMPLETED').length /
-              enrollments.length) *
-              100
+            (enrollments.filter(e => e.status === 'COMPLETED').length / enrollments.length) * 100
           )
         : 0
     }
   });
 });
 
-app.get('/api/v1/company/learners', requireAuth, allow('COMPANY'), (req, res) => {
-  const courses = db.courses.filter(c => c.companyId === req.user.companyId);
-  const courseIds = new Set(courses.map(c => c.id));
-  const enrollments = db.enrollments.filter(e => courseIds.has(e.courseId));
+app.get('/api/v1/company/learners', requireAuth, allow('COMPANY'), async (req, res) => {
+  const { rows } = await query(
+    `SELECT e.id, e.id AS enrollment_id, e.user_id, e.course_id, e.progress, e.status, e.started_at,
+            u.name AS learner_name, u.email AS learner_email,
+            c.title AS course_title,
+            cert.certificate_id
+     FROM enrollments e
+     JOIN courses c ON e.course_id = c.id
+     JOIN users u ON e.user_id = u.id
+     LEFT JOIN certificates cert ON cert.course_id = e.course_id AND cert.learner_id = e.user_id
+     WHERE c.company_id = $1
+     ORDER BY e.started_at DESC`,
+    [req.user.companyId]
+  );
 
-  const list = enrollments.map(enrollment => {
-    const learner = db.users.find(u => u.id === enrollment.userId);
-    const course = courses.find(c => c.id === enrollment.courseId);
-    const cert = db.certificates.find(
-      c => c.courseId === enrollment.courseId && c.learnerId === enrollment.userId
-    );
-    return {
-      id: enrollment.id,
-      enrollmentId: enrollment.id,
-      userId: enrollment.userId,
-      learnerName: learner?.name || 'Learner',
-      learnerEmail: learner?.email || '',
-      courseId: enrollment.courseId,
-      courseTitle: course?.title || 'Unknown course',
-      progress: enrollment.progress || 0,
-      status: enrollment.status || 'IN_PROGRESS',
-      lastAccessed: enrollment.lastAccessed,
-      certified: Boolean(cert),
-      certificateId: cert?.certificateId || null
-    };
-  });
+  const list = rows.map(r => ({
+    id: r.id,
+    enrollmentId: r.enrollment_id,
+    userId: r.user_id,
+    learnerName: r.learner_name || 'Learner',
+    learnerEmail: r.learner_email || '',
+    courseId: r.course_id,
+    courseTitle: r.course_title || 'Unknown course',
+    progress: r.progress || 0,
+    status: r.status || 'IN_PROGRESS',
+    lastAccessed: r.started_at,
+    certified: Boolean(r.certificate_id),
+    certificateId: r.certificate_id || null
+  }));
 
-  response(res, list);
+  return response(res, list);
 });
 
-app.post('/api/v1/courses/draft', requireAuth, allow('COMPANY'), (req, res) => {
+app.post('/api/v1/courses/draft', requireAuth, allow('COMPANY'), async (req, res) => {
   if (!req.body.title || !req.body.description) {
     return res.status(400).json({
       success: false,
@@ -584,9 +697,12 @@ app.post('/api/v1/courses/draft', requireAuth, allow('COMPANY'), (req, res) => {
     });
   }
 
+  const assessmentId = id();
+  const courseId = id();
+
   const assessment = {
-    id: id(),
-    courseId: id(),
+    id: assessmentId,
+    courseId,
     title: req.body.assessmentTitle || `${req.body.title} final assessment`,
     description: req.body.assessmentDescription || '',
     passingScore: Number(req.body.passingScore || 70),
@@ -622,18 +738,21 @@ app.post('/api/v1/courses/draft', requireAuth, allow('COMPANY'), (req, res) => {
     })
   );
 
+  let instructorName = req.body.instructorName;
+  if (!instructorName) {
+    const compRes = await query('SELECT name FROM companies WHERE id = $1', [req.user.companyId]);
+    instructorName = compRes.rows[0]?.name || 'LearnForge provider';
+  }
+
   const course = {
-    id: assessment.courseId,
+    id: courseId,
     title: req.body.title,
     description: req.body.description,
     detailedDescription: req.body.detailedDescription || req.body.description,
     category: req.body.category || 'Professional skills',
     difficulty: req.body.difficulty || 'BEGINNER',
     duration: req.body.duration || `${modules.length || 1} modules`,
-    instructorName:
-      req.body.instructorName ||
-      db.companies.find(company => company.id === req.user.companyId)?.name ||
-      'LearnForge provider',
+    instructorName,
     instructorBio: req.body.instructorBio || '',
     thumbnail: req.body.thumbnail || '',
     learningObjectives: req.body.learningObjectives || [],
@@ -643,24 +762,71 @@ app.post('/api/v1/courses/draft', requireAuth, allow('COMPANY'), (req, res) => {
     status: 'DRAFT',
     modules,
     skills: req.body.skills || [],
-    assessmentId: assessment.id
+    assessmentId: assessment.id,
+    videoUrl: req.body.videoUrl || ''
   };
 
-  assessment.courseId = course.id;
+  await query(
+    `INSERT INTO assessments (id, course_id, title, passing_score, max_attempts, questions, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
+    [
+      assessment.id,
+      assessment.courseId,
+      assessment.title,
+      assessment.passingScore,
+      assessment.maxAttempts,
+      JSON.stringify(assessment.questions)
+    ]
+  );
+
+  await query(
+    `INSERT INTO courses (
+       id, title, description, detailed_description, thumbnail, category, difficulty, duration,
+       instructor_name, instructor_bio, prerequisites, learning_objectives, target_audience,
+       status, company_id, modules, skills, assessment_id, video_url, created_at, updated_at
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, NOW(), NOW())`,
+    [
+      course.id,
+      course.title,
+      course.description,
+      course.detailedDescription,
+      course.thumbnail,
+      course.category,
+      course.difficulty,
+      course.duration,
+      course.instructorName,
+      course.instructorBio,
+      course.prerequisites,
+      JSON.stringify(course.learningObjectives),
+      course.targetAudience,
+      course.status,
+      course.companyId,
+      JSON.stringify(course.modules),
+      JSON.stringify(course.skills),
+      course.assessmentId,
+      course.videoUrl
+    ]
+  );
+
+  db.courses = db.courses || [];
   db.courses.push(course);
+  db.assessments = db.assessments || [];
   db.assessments.push(assessment);
-  persistDatabase().catch(err => console.error('PostgreSQL persistence error:', err.message));
-  audit(req, 'COURSE_DRAFT_CREATED', 'COURSE', course.id);
-  response(res, courseWithCompany(course), 'Draft saved');
+
+  await audit(req, 'COURSE_DRAFT_CREATED', 'COURSE', course.id);
+  return response(res, course, 'Draft saved');
 });
 
-app.post('/api/v1/courses', requireAuth, allow('COMPANY'), (req, res) => {
+app.post('/api/v1/courses', requireAuth, allow('COMPANY'), async (req, res) => {
   if (!req.body.title || !req.body.description || !(req.body.modules || []).length) {
     return res.status(400).json({
       success: false,
       message: 'Title, description, and at least one module are required'
     });
   }
+
+  const courseId = id();
+  const assessmentId = id();
 
   const modules = req.body.modules.map(module =>
     normalizeModule({
@@ -681,17 +847,21 @@ app.post('/api/v1/courses', requireAuth, allow('COMPANY'), (req, res) => {
     })
   );
 
+  let instructorName = req.body.instructorName;
+  if (!instructorName) {
+    const compRes = await query('SELECT name FROM companies WHERE id = $1', [req.user.companyId]);
+    instructorName = compRes.rows[0]?.name || 'LearnForge provider';
+  }
+
   const course = {
-    id: id(),
+    id: courseId,
     title: req.body.title,
     description: req.body.description,
     detailedDescription: req.body.detailedDescription || req.body.description,
     category: req.body.category || 'Professional skills',
     difficulty: req.body.difficulty || 'BEGINNER',
     duration: req.body.duration || `${modules.length} modules`,
-    instructorName:
-      req.body.instructorName ||
-      db.companies.find(company => company.id === req.user.companyId)?.name,
+    instructorName,
     instructorBio: req.body.instructorBio || '',
     thumbnail: req.body.thumbnail || '',
     learningObjectives: req.body.learningObjectives || [],
@@ -701,11 +871,12 @@ app.post('/api/v1/courses', requireAuth, allow('COMPANY'), (req, res) => {
     status: 'DRAFT',
     modules,
     skills: req.body.skills || [],
-    assessmentId: null
+    assessmentId,
+    videoUrl: req.body.videoUrl || ''
   };
 
   const assessment = {
-    id: id(),
+    id: assessmentId,
     courseId: course.id,
     title: req.body.assessmentTitle || `${course.title} final assessment`,
     description: req.body.assessmentDescription || '',
@@ -718,78 +889,176 @@ app.post('/api/v1/courses', requireAuth, allow('COMPANY'), (req, res) => {
       ...question,
       id: question.id || id(),
       marks: Number(question.marks || 1),
-      type: question.type || 'SINGLE'
+      type: question.type || 'SINGLE',
+      options: (question.options || []).map(opt => ({ ...opt, id: opt.id || id() }))
     }))
   };
 
-  course.assessmentId = assessment.id;
+  await query(
+    `INSERT INTO assessments (id, course_id, title, passing_score, max_attempts, questions, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
+    [
+      assessment.id,
+      assessment.courseId,
+      assessment.title,
+      assessment.passingScore,
+      assessment.maxAttempts,
+      JSON.stringify(assessment.questions)
+    ]
+  );
+
+  await query(
+    `INSERT INTO courses (
+       id, title, description, detailed_description, thumbnail, category, difficulty, duration,
+       instructor_name, instructor_bio, prerequisites, learning_objectives, target_audience,
+       status, company_id, modules, skills, assessment_id, video_url, created_at, updated_at
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, NOW(), NOW())`,
+    [
+      course.id,
+      course.title,
+      course.description,
+      course.detailedDescription,
+      course.thumbnail,
+      course.category,
+      course.difficulty,
+      course.duration,
+      course.instructorName,
+      course.instructorBio,
+      course.prerequisites,
+      JSON.stringify(course.learningObjectives),
+      course.targetAudience,
+      course.status,
+      course.companyId,
+      JSON.stringify(course.modules),
+      JSON.stringify(course.skills),
+      course.assessmentId,
+      course.videoUrl
+    ]
+  );
+
+  db.courses = db.courses || [];
   db.courses.push(course);
+  db.assessments = db.assessments || [];
   db.assessments.push(assessment);
-  persistDatabase().catch(err => console.error('PostgreSQL persistence error:', err.message));
-  audit(req, 'COURSE_CREATED', 'COURSE', course.id);
-  response(res, courseWithCompany(course), 'Course created successfully');
+
+  await audit(req, 'COURSE_CREATED', 'COURSE', course.id);
+  return response(res, course, 'Course created successfully');
 });
 
-app.patch('/api/v1/courses/:id', requireAuth, allow('COMPANY'), (req, res) => {
-  const course = db.courses.find(item => item.id === req.params.id);
-  if (!course || !ownsCourse(req, course)) {
+app.patch('/api/v1/courses/:id', requireAuth, allow('COMPANY'), async (req, res) => {
+  const { rows } = await query('SELECT * FROM courses WHERE id = $1', [req.params.id]);
+  if (!rows.length) {
     return res.status(404).json({
       success: false,
       message: 'Owned course not found'
     });
   }
 
-  Object.assign(course, {
-    title: req.body.title ?? course.title,
-    description: req.body.description ?? course.description,
-    detailedDescription: req.body.detailedDescription ?? course.detailedDescription,
-    category: req.body.category ?? course.category,
-    difficulty: req.body.difficulty ?? course.difficulty,
-    duration: req.body.duration ?? course.duration,
-    instructorName: req.body.instructorName ?? course.instructorName,
-    instructorBio: req.body.instructorBio ?? course.instructorBio,
-    thumbnail: req.body.thumbnail ?? course.thumbnail,
-    learningObjectives: req.body.learningObjectives ?? course.learningObjectives,
-    prerequisites: req.body.prerequisites ?? course.prerequisites,
-    targetAudience: req.body.targetAudience ?? course.targetAudience,
-    skills: req.body.skills ?? course.skills,
-    modules: req.body.modules
-      ? req.body.modules.map((module, idx) =>
-          normalizeModule({
-            ...module,
-            id: module.id || course.modules?.[idx]?.id || id()
-          })
-        )
-      : course.modules
-  });
-
-  persistDatabase().catch(err => console.error('PostgreSQL persistence error:', err.message));
-  audit(req, 'COURSE_UPDATED', 'COURSE', course.id);
-  response(res, courseWithCompany(course), 'Course updated successfully');
-});
-
-app.delete('/api/v1/courses/:id', requireAuth, allow('COMPANY'), (req, res) => {
-  const index = db.courses.findIndex(item => item.id === req.params.id);
-  const course = db.courses[index];
-  if (index < 0 || !ownsCourse(req, course)) {
+  const course = mapCourse(rows[0]);
+  if (!ownsCourse(req, course)) {
     return res.status(404).json({
       success: false,
       message: 'Owned course not found'
     });
   }
 
-  db.courses.splice(index, 1);
-  db.assessments = db.assessments.filter(assessment => assessment.courseId !== course.id);
-  db.enrollments = db.enrollments.filter(enrollment => enrollment.courseId !== course.id);
-  query('DELETE FROM courses WHERE id = $1', [course.id]).catch(() => {});
-  persistDatabase().catch(err => console.error('PostgreSQL persistence error:', err.message));
-  audit(req, 'COURSE_DELETED', 'COURSE', course.id);
-  response(res, null, 'Course deleted');
+  const updatedTitle = req.body.title ?? course.title;
+  const updatedDescription = req.body.description ?? course.description;
+  const updatedDetailedDescription = req.body.detailedDescription ?? course.detailedDescription;
+  const updatedCategory = req.body.category ?? course.category;
+  const updatedDifficulty = req.body.difficulty ?? course.difficulty;
+  const updatedDuration = req.body.duration ?? course.duration;
+  const updatedInstructorName = req.body.instructorName ?? course.instructorName;
+  const updatedInstructorBio = req.body.instructorBio ?? course.instructorBio;
+  const updatedThumbnail = req.body.thumbnail ?? course.thumbnail;
+  const updatedLearningObjectives = req.body.learningObjectives ?? course.learningObjectives;
+  const updatedPrerequisites = req.body.prerequisites ?? course.prerequisites;
+  const updatedTargetAudience = req.body.targetAudience ?? course.targetAudience;
+  const updatedSkills = req.body.skills ?? course.skills;
+  const updatedModules = req.body.modules
+    ? req.body.modules.map((module, idx) =>
+        normalizeModule({
+          ...module,
+          id: module.id || course.modules?.[idx]?.id || id()
+        })
+      )
+    : course.modules;
+
+  const updateRes = await query(
+    `UPDATE courses SET
+       title = $1, description = $2, detailed_description = $3, category = $4,
+       difficulty = $5, duration = $6, instructor_name = $7, instructor_bio = $8,
+       thumbnail = $9, learning_objectives = $10, prerequisites = $11,
+       target_audience = $12, skills = $13, modules = $14, updated_at = NOW()
+     WHERE id = $15
+     RETURNING *`,
+    [
+      updatedTitle,
+      updatedDescription,
+      updatedDetailedDescription,
+      updatedCategory,
+      updatedDifficulty,
+      updatedDuration,
+      updatedInstructorName,
+      updatedInstructorBio,
+      updatedThumbnail,
+      JSON.stringify(updatedLearningObjectives),
+      updatedPrerequisites,
+      updatedTargetAudience,
+      JSON.stringify(updatedSkills),
+      JSON.stringify(updatedModules),
+      course.id
+    ]
+  );
+
+  const updatedCourse = mapCourse(updateRes.rows[0]);
+  const memIdx = (db.courses || []).findIndex(c => c.id === updatedCourse.id);
+  if (memIdx >= 0) db.courses[memIdx] = updatedCourse;
+
+  await audit(req, 'COURSE_UPDATED', 'COURSE', updatedCourse.id);
+  return response(res, updatedCourse, 'Course updated successfully');
+});
+
+app.delete('/api/v1/courses/:id', requireAuth, allow('COMPANY'), async (req, res) => {
+  const { rows } = await query('SELECT * FROM courses WHERE id = $1', [req.params.id]);
+  if (!rows.length) {
+    return res.status(404).json({
+      success: false,
+      message: 'Owned course not found'
+    });
+  }
+
+  const course = mapCourse(rows[0]);
+  if (!ownsCourse(req, course)) {
+    return res.status(404).json({
+      success: false,
+      message: 'Owned course not found'
+    });
+  }
+
+  await query('DELETE FROM assessments WHERE course_id = $1 OR id = $2', [course.id, course.assessmentId]);
+  await query('DELETE FROM enrollments WHERE course_id = $1', [course.id]);
+  await query('DELETE FROM courses WHERE id = $1', [course.id]);
+
+  db.courses = (db.courses || []).filter(c => c.id !== course.id);
+  db.assessments = (db.assessments || []).filter(a => a.courseId !== course.id && a.id !== course.assessmentId);
+  db.enrollments = (db.enrollments || []).filter(e => e.courseId !== course.id);
+
+  await audit(req, 'COURSE_DELETED', 'COURSE', course.id);
+  return response(res, null, 'Course deleted');
 });
 
 app.patch('/api/v1/courses/:id/publish', requireAuth, allow('COMPANY'), async (req, res) => {
-  const course = db.courses.find(item => item.id === req.params.id);
-  if (!course || !ownsCourse(req, course)) {
+  const { rows } = await query('SELECT * FROM courses WHERE id = $1', [req.params.id]);
+  if (!rows.length) {
+    return res.status(404).json({
+      success: false,
+      message: 'Owned course not found'
+    });
+  }
+
+  const course = mapCourse(rows[0]);
+  if (!ownsCourse(req, course)) {
     return res.status(404).json({
       success: false,
       message: 'Owned course not found'
@@ -797,7 +1066,9 @@ app.patch('/api/v1/courses/:id/publish', requireAuth, allow('COMPANY'), async (r
   }
 
   if (course.status !== 'PUBLISHED') {
-    const errors = validateCourseForPublish(course, db.assessments);
+    const asmtRows = (await query('SELECT * FROM assessments WHERE course_id = $1 OR id = $2', [course.id, course.assessmentId])).rows;
+    const assessments = asmtRows.map(mapAssessment);
+    const errors = validateCourseForPublish(course, assessments);
     if (errors.length) {
       return res.status(400).json({
         success: false,
@@ -807,86 +1078,120 @@ app.patch('/api/v1/courses/:id/publish', requireAuth, allow('COMPANY'), async (r
     }
   }
 
-  course.status = course.status === 'PUBLISHED' ? 'UNPUBLISHED' : 'PUBLISHED';
-  await query('UPDATE courses SET status = $1, updated_at = NOW() WHERE id = $2', [course.status, course.id]);
-  await persistDatabase().catch(err => console.error('PostgreSQL persistence error:', err.message));
+  const nextStatus = course.status === 'PUBLISHED' ? 'UNPUBLISHED' : 'PUBLISHED';
+  const updateRes = await query(
+    'UPDATE courses SET status = $1, updated_at = NOW() WHERE id = $2 RETURNING *',
+    [nextStatus, course.id]
+  );
+  const updatedCourse = mapCourse(updateRes.rows[0]);
 
-  audit(req, 'COURSE_PUBLICATION_CHANGED', 'COURSE', course.id, {
-    status: course.status
+  const memIdx = (db.courses || []).findIndex(c => c.id === updatedCourse.id);
+  if (memIdx >= 0) db.courses[memIdx] = updatedCourse;
+
+  await audit(req, 'COURSE_PUBLICATION_CHANGED', 'COURSE', updatedCourse.id, {
+    status: updatedCourse.status
   });
-  response(res, courseWithCompany(course), `Course ${course.status.toLowerCase()}`);
+  return response(res, updatedCourse, `Course ${updatedCourse.status.toLowerCase()}`);
 });
 
 // Enrollment & Progress endpoints
-app.post('/api/v1/enrollments', requireAuth, allow('LEARNER'), (req, res) => {
-  const course = db.courses.find(c => c.id === req.body.courseId);
-  if (!course) {
+app.post('/api/v1/enrollments', requireAuth, allow('LEARNER'), async (req, res) => {
+  const courseRes = await query('SELECT * FROM courses WHERE id = $1', [req.body.courseId]);
+  if (!courseRes.rows.length) {
     return res.status(404).json({
       success: false,
       message: 'Course not found'
     });
   }
+  const course = mapCourse(courseRes.rows[0]);
 
-  let enrollment = db.enrollments.find(e => e.userId === req.user.id && e.courseId === course.id);
-  if (!enrollment) {
-    enrollment = {
-      id: id(),
-      userId: req.user.id,
-      courseId: course.id,
-      progress: 0,
-      viewedModuleIds: [],
-      completedLessonIds: [],
-      completedModuleIds: [],
-      passedQuizIds: [],
-      status: 'IN_PROGRESS',
-      lastAccessed: now()
-    };
+  const existingRes = await query(
+    'SELECT * FROM enrollments WHERE user_id = $1 AND course_id = $2',
+    [req.user.id, course.id]
+  );
+
+  let enrollment;
+  if (existingRes.rows.length > 0) {
+    enrollment = mapEnrollment(existingRes.rows[0]);
+  } else {
+    const enrId = id();
+    const insertRes = await query(
+      `INSERT INTO enrollments (id, user_id, course_id, progress, status, completed_modules, completed_lessons, started_at)
+       VALUES ($1, $2, $3, 0, 'IN_PROGRESS', '[]', '[]', NOW())
+       RETURNING *`,
+      [enrId, req.user.id, course.id]
+    );
+    enrollment = mapEnrollment(insertRes.rows[0]);
+    db.enrollments = db.enrollments || [];
     db.enrollments.push(enrollment);
-    notify(req.user.id, 'Enrollment confirmed', `You are enrolled in ${course.title}`);
-    audit(req, 'ENROLLMENT', 'COURSE', course.id);
+
+    await notify(req.user.id, 'Enrollment confirmed', `You are enrolled in ${course.title}`);
+    await audit(req, 'ENROLLMENT', 'COURSE', course.id);
   }
 
-  response(res, enrollment, 'Enrollment confirmed');
+  return response(res, enrollment, 'Enrollment confirmed');
 });
 
-app.get('/api/v1/enrollments/me', requireAuth, (req, res) =>
-  response(
-    res,
-    db.enrollments
-      .filter(e => e.userId === req.user.id)
-      .map(e => ({
-        ...e,
-        course: db.courses.find(c => c.id === e.courseId)
-      }))
-  )
-);
+app.get('/api/v1/enrollments/me', requireAuth, async (req, res) => {
+  const { rows } = await query(
+    `SELECT e.*, c.id AS c_id, c.title AS c_title, c.description AS c_description,
+            c.thumbnail AS c_thumbnail, c.category AS c_category, c.difficulty AS c_difficulty,
+            c.duration AS c_duration, c.instructor_name AS c_instructor_name,
+            c.modules AS c_modules, c.assessment_id AS c_assessment_id, c.status AS c_status
+     FROM enrollments e
+     JOIN courses c ON e.course_id = c.id
+     WHERE e.user_id = $1
+     ORDER BY e.started_at DESC`,
+    [req.user.id]
+  );
 
-app.get('/api/v1/progress/:courseId/:moduleId', requireAuth, allow('LEARNER'), (req, res) => {
-  const course = ensureCourseIds(db.courses.find(c => c.id === req.params.courseId));
-  if (!course) {
+  const list = rows.map(r => {
+    const e = mapEnrollment(r);
+    e.course = {
+      id: r.c_id,
+      title: r.c_title,
+      description: r.c_description,
+      thumbnail: r.c_thumbnail,
+      category: r.c_category,
+      difficulty: r.c_difficulty,
+      duration: r.c_duration,
+      instructorName: r.c_instructor_name,
+      modules: r.c_modules,
+      assessmentId: r.c_assessment_id,
+      status: r.c_status
+    };
+    return e;
+  });
+
+  return response(res, list);
+});
+
+app.get('/api/v1/progress/:courseId/:moduleId', requireAuth, allow('LEARNER'), async (req, res) => {
+  const courseRes = await query('SELECT * FROM courses WHERE id = $1', [req.params.courseId]);
+  if (!courseRes.rows.length) {
     return res.status(404).json({
       success: false,
       message: 'Course not found'
     });
   }
+  const course = ensureCourseIds(mapCourse(courseRes.rows[0]));
 
-  let enrollment = db.enrollments.find(
-    e => e.userId === req.user.id && e.courseId === req.params.courseId
+  const enrRes = await query(
+    'SELECT * FROM enrollments WHERE user_id = $1 AND course_id = $2',
+    [req.user.id, req.params.courseId]
   );
-  if (!enrollment) {
-    enrollment = {
-      id: id(),
-      userId: req.user.id,
-      courseId: course.id,
-      progress: 0,
-      viewedModuleIds: [],
-      completedLessonIds: [],
-      completedModuleIds: [],
-      passedQuizIds: [],
-      status: 'IN_PROGRESS',
-      lastAccessed: now()
-    };
-    db.enrollments.push(enrollment);
+
+  let enrollment;
+  if (enrRes.rows.length > 0) {
+    enrollment = mapEnrollment(enrRes.rows[0]);
+  } else {
+    const insertRes = await query(
+      `INSERT INTO enrollments (id, user_id, course_id, progress, status, completed_modules, completed_lessons, started_at)
+       VALUES ($1, $2, $3, 0, 'IN_PROGRESS', '[]', '[]', NOW())
+       RETURNING *`,
+      [id(), req.user.id, course.id]
+    );
+    enrollment = mapEnrollment(insertRes.rows[0]);
   }
 
   const module = course.modules.find(m => m.id === req.params.moduleId) || course.modules[0];
@@ -897,92 +1202,57 @@ app.get('/api/v1/progress/:courseId/:moduleId', requireAuth, allow('LEARNER'), (
     });
   }
 
-  enrollment.viewedModuleIds ||= [];
-  enrollment.completedModuleIds ||= [];
-
-  response(res, {
+  const completed = (enrollment.completedModules || []).includes(module.id);
+  return response(res, {
     module,
-    viewed: enrollment.viewedModuleIds.includes(module.id),
-    completed: enrollment.completedModuleIds.includes(module.id),
-    quizPassed: module.quiz?.every(q => enrollment.passedQuizIds?.includes(q.id)) ?? true
+    viewed: completed,
+    completed,
+    quizPassed: true
   });
 });
 
-app.post('/api/v1/progress/:courseId/:moduleId/read', requireAuth, allow('LEARNER'), (req, res) => {
-  const course = ensureCourseIds(db.courses.find(c => c.id === req.params.courseId));
-  if (!course) {
+app.post('/api/v1/progress/:courseId/:moduleId/read', requireAuth, allow('LEARNER'), async (req, res) => {
+  const courseRes = await query('SELECT * FROM courses WHERE id = $1', [req.params.courseId]);
+  if (!courseRes.rows.length) {
     return res.status(404).json({
       success: false,
       message: 'Course not found'
     });
   }
 
-  let enrollment = db.enrollments.find(
-    e => e.userId === req.user.id && e.courseId === req.params.courseId
-  );
-  if (!enrollment) {
-    enrollment = {
-      id: id(),
-      userId: req.user.id,
-      courseId: course.id,
-      progress: 0,
-      viewedModuleIds: [],
-      completedLessonIds: [],
-      completedModuleIds: [],
-      passedQuizIds: [],
-      status: 'IN_PROGRESS',
-      lastAccessed: now()
-    };
-    db.enrollments.push(enrollment);
-  }
-
-  const module = course.modules.find(m => m.id === req.params.moduleId) || course.modules[0];
-  if (!module) {
-    return res.status(404).json({
-      success: false,
-      message: 'Module not found'
-    });
-  }
-
-  enrollment.viewedModuleIds ||= [];
-  if (!enrollment.viewedModuleIds.includes(module.id)) {
-    enrollment.viewedModuleIds.push(module.id);
-  }
-  enrollment.lastAccessed = now();
-
-  response(res, { viewed: true }, 'Content marked as read');
+  return response(res, { viewed: true }, 'Content marked as read');
 });
 
 app.post(
   '/api/v1/progress/:courseId/:moduleId/lessons/:lessonId/complete',
   requireAuth,
   allow('LEARNER'),
-  (req, res) => {
-    const course = ensureCourseIds(db.courses.find(c => c.id === req.params.courseId));
-    if (!course) {
+  async (req, res) => {
+    const courseRes = await query('SELECT * FROM courses WHERE id = $1', [req.params.courseId]);
+    if (!courseRes.rows.length) {
       return res.status(404).json({
         success: false,
         message: 'Course not found'
       });
     }
+    const course = ensureCourseIds(mapCourse(courseRes.rows[0]));
 
-    let enrollment = db.enrollments.find(
-      e => e.userId === req.user.id && e.courseId === req.params.courseId
+    const enrRes = await query(
+      'SELECT * FROM enrollments WHERE user_id = $1 AND course_id = $2',
+      [req.user.id, req.params.courseId]
     );
-    if (!enrollment) {
-      enrollment = {
-        id: id(),
-        userId: req.user.id,
-        courseId: course.id,
-        progress: 0,
-        viewedModuleIds: [],
-        completedLessonIds: [],
-        completedModuleIds: [],
-        passedQuizIds: [],
-        status: 'IN_PROGRESS',
-        lastAccessed: now()
-      };
-      db.enrollments.push(enrollment);
+
+    let enrollment;
+    if (enrRes.rows.length > 0) {
+      enrollment = mapEnrollment(enrRes.rows[0]);
+    } else {
+      const insertRes = await query(
+        `INSERT INTO enrollments (id, user_id, course_id, progress, status, completed_modules, completed_lessons, started_at)
+         VALUES ($1, $2, $3, 0, 'IN_PROGRESS', '[]', '[]', NOW())
+         RETURNING *`,
+        [id(), req.user.id, course.id]
+      );
+      enrollment = mapEnrollment(insertRes.rows[0]);
     }
 
     const module = course.modules.find(item => item.id === req.params.moduleId) || course.modules[0];
@@ -995,18 +1265,20 @@ app.post(
       });
     }
 
-    enrollment.completedLessonIds ||= [];
-    if (!enrollment.completedLessonIds.includes(lesson.id)) {
-      enrollment.completedLessonIds.push(lesson.id);
+    const completedLessonIds = Array.isArray(enrollment.completedLessons) ? [...enrollment.completedLessons] : [];
+    if (!completedLessonIds.includes(lesson.id)) {
+      completedLessonIds.push(lesson.id);
+      await query('UPDATE enrollments SET completed_lessons = $1 WHERE id = $2', [
+        JSON.stringify(completedLessonIds),
+        enrollment.id
+      ]);
     }
-    enrollment.completedLessons = enrollment.completedLessonIds;
-    enrollment.lastAccessed = now();
 
-    response(
+    return response(
       res,
       {
-        completedLessonIds: enrollment.completedLessonIds,
-        completedLessons: enrollment.completedLessonIds
+        completedLessonIds,
+        completedLessons: completedLessonIds
       },
       'Lesson completed'
     );
@@ -1014,29 +1286,31 @@ app.post(
 );
 
 app.post('/api/v1/progress', requireAuth, allow('LEARNER'), async (req, res) => {
-  const course = ensureCourseIds(db.courses.find(c => c.id === req.body.courseId));
-  if (!course) {
+  const courseRes = await query('SELECT * FROM courses WHERE id = $1', [req.body.courseId]);
+  if (!courseRes.rows.length) {
     return res.status(404).json({
       success: false,
       message: 'Course not found'
     });
   }
+  const course = ensureCourseIds(mapCourse(courseRes.rows[0]));
 
-  let enrollment = db.enrollments.find(e => e.userId === req.user.id && e.courseId === req.body.courseId);
-  if (!enrollment) {
-    enrollment = {
-      id: id(),
-      userId: req.user.id,
-      courseId: course.id,
-      progress: 0,
-      viewedModuleIds: [],
-      completedLessonIds: [],
-      completedModuleIds: [],
-      passedQuizIds: [],
-      status: 'IN_PROGRESS',
-      lastAccessed: now()
-    };
-    db.enrollments.push(enrollment);
+  const enrRes = await query(
+    'SELECT * FROM enrollments WHERE user_id = $1 AND course_id = $2',
+    [req.user.id, course.id]
+  );
+
+  let enrollment;
+  if (enrRes.rows.length > 0) {
+    enrollment = mapEnrollment(enrRes.rows[0]);
+  } else {
+    const insertRes = await query(
+      `INSERT INTO enrollments (id, user_id, course_id, progress, status, completed_modules, completed_lessons, started_at)
+       VALUES ($1, $2, $3, 0, 'IN_PROGRESS', '[]', '[]', NOW())
+       RETURNING *`,
+      [id(), req.user.id, course.id]
+    );
+    enrollment = mapEnrollment(insertRes.rows[0]);
   }
 
   const module = course.modules.find(m => m.id === req.body.moduleId) || course.modules[0];
@@ -1047,89 +1321,78 @@ app.post('/api/v1/progress', requireAuth, allow('LEARNER'), async (req, res) => 
     });
   }
 
-  enrollment.viewedModuleIds ||= [];
-  enrollment.completedLessonIds ||= [];
-  enrollment.completedModuleIds ||= [];
-  enrollment.passedQuizIds ||= [];
-
-  if (!enrollment.viewedModuleIds.includes(module.id)) {
-    enrollment.viewedModuleIds.push(module.id);
-  }
+  const completedModules = Array.isArray(enrollment.completedModules) ? [...enrollment.completedModules] : [];
+  const completedLessons = Array.isArray(enrollment.completedLessons) ? [...enrollment.completedLessons] : [];
 
   module.lessons?.forEach(l => {
-    if (!enrollment.completedLessonIds.includes(l.id)) {
-      enrollment.completedLessonIds.push(l.id);
+    if (!completedLessons.includes(l.id)) {
+      completedLessons.push(l.id);
     }
   });
 
-  if (module.quiz?.some(q => !enrollment.passedQuizIds.includes(q.id))) {
-    return res.status(400).json({
-      success: false,
-      message: 'Pass the module quiz before completing it'
-    });
+  if (module.id && !completedModules.includes(module.id)) {
+    completedModules.push(module.id);
   }
 
-  if (!enrollment.completedModuleIds.includes(module.id)) {
-    enrollment.completedModuleIds.push(module.id);
-  }
+  const progress = Math.min(100, Math.round((completedModules.length / (course.modules.length || 1)) * 100));
+  const isCompleted = progress === 100;
+  const status = isCompleted ? 'COMPLETED' : enrollment.status;
+  const completedAt = isCompleted ? (enrollment.completedAt || new Date().toISOString()) : null;
 
-  enrollment.progress = Math.round((enrollment.completedModuleIds.length / course.modules.length) * 100);
-  enrollment.lastAccessed = now();
+  await query(
+    `UPDATE enrollments SET
+       progress = $1, completed_modules = $2, completed_lessons = $3, status = $4, completed_at = $5
+     WHERE id = $6`,
+    [progress, JSON.stringify(completedModules), JSON.stringify(completedLessons), status, completedAt, enrollment.id]
+  );
+
+  enrollment.progress = progress;
+  enrollment.completedModules = completedModules;
+  enrollment.completedLessons = completedLessons;
+  enrollment.completedModuleIds = completedModules;
+  enrollment.completedLessonIds = completedLessons;
+  enrollment.status = status;
+  enrollment.completedAt = completedAt;
 
   let certificate = null;
-  if (enrollment.progress === 100) {
-    enrollment.status = 'COMPLETED';
-    enrollment.completedAt = enrollment.completedAt || now();
-    notify(req.user.id, 'Course completed', `You completed ${course.title}`);
+  if (isCompleted) {
+    await notify(req.user.id, 'Course completed', `You completed ${course.title}`);
 
     // If final assessment was already taken and passed, automatically issue/update certificate
-    const userAttempts = db.attempts.filter(
-      a => a.userId === req.user.id && a.assessmentId === course.assessmentId
+    const attemptsRes = await query(
+      'SELECT * FROM attempts WHERE user_id = $1 AND assessment_id = $2',
+      [req.user.id, course.assessmentId]
     );
-    const passed = userAttempts.some(a => a.passed);
-    if (passed) {
+    const userAttempts = attemptsRes.rows.map(mapAttempt);
+    if (userAttempts.some(a => a.passed)) {
       const highestScore = Math.max(...userAttempts.map(a => a.score));
+      const userRes = await query('SELECT * FROM users WHERE id = $1', [req.user.id]);
+      const user = mapUser(userRes.rows[0]);
       certificate = await issueCertificate({
-        user: db.users.find(u => u.id === req.user.id),
+        user,
         course,
         score: highestScore
       });
     }
   }
 
-  audit(req, 'MODULE_COMPLETION', 'COURSE', course.id, { moduleId: module.id });
-  response(res, { ...enrollment, certificate }, 'Progress saved');
+  const memIdx = (db.enrollments || []).findIndex(e => e.id === enrollment.id);
+  if (memIdx >= 0) db.enrollments[memIdx] = enrollment;
+  else (db.enrollments = db.enrollments || []).push(enrollment);
+
+  await audit(req, 'MODULE_COMPLETION', 'COURSE', course.id, { moduleId: module.id });
+  return response(res, { ...enrollment, certificate }, 'Progress saved');
 });
 
-app.get('/api/v1/modules/:courseId/:moduleId/quiz', requireAuth, allow('LEARNER'), (req, res) => {
-  const course = ensureCourseIds(db.courses.find(c => c.id === req.params.courseId));
-  const module = course?.modules.find(m => m.id === req.params.moduleId) || course?.modules?.[0];
-  if (!module) {
-    return res.status(404).json({
-      success: false,
-      message: 'Module not found'
-    });
-  }
-
-  response(res, {
-    moduleId: module.id,
-    questions: (module.quiz || []).map(q => ({
-      id: q.id,
-      text: q.text,
-      options: q.options.map(({ correct, ...option }) => option)
-    }))
-  });
-});
-
-app.post('/api/v1/modules/:courseId/:moduleId/quiz', requireAuth, allow('LEARNER'), (req, res) => {
-  const course = ensureCourseIds(db.courses.find(c => c.id === req.params.courseId));
-  if (!course) {
+app.get('/api/v1/modules/:courseId/:moduleId/quiz', requireAuth, allow('LEARNER'), async (req, res) => {
+  const courseRes = await query('SELECT * FROM courses WHERE id = $1', [req.params.courseId]);
+  if (!courseRes.rows.length) {
     return res.status(404).json({
       success: false,
       message: 'Course not found'
     });
   }
-
+  const course = ensureCourseIds(mapCourse(courseRes.rows[0]));
   const module = course.modules.find(m => m.id === req.params.moduleId) || course.modules[0];
   if (!module) {
     return res.status(404).json({
@@ -1138,29 +1401,30 @@ app.post('/api/v1/modules/:courseId/:moduleId/quiz', requireAuth, allow('LEARNER
     });
   }
 
-  let enrollment = db.enrollments.find(
-    e => e.userId === req.user.id && e.courseId === req.params.courseId
-  );
-  if (!enrollment) {
-    enrollment = {
-      id: id(),
-      userId: req.user.id,
-      courseId: course.id,
-      progress: 0,
-      viewedModuleIds: [],
-      completedLessonIds: [],
-      completedModuleIds: [],
-      passedQuizIds: [],
-      status: 'IN_PROGRESS',
-      lastAccessed: now()
-    };
-    db.enrollments.push(enrollment);
-  }
+  return response(res, {
+    moduleId: module.id,
+    questions: (module.quiz || []).map(q => ({
+      id: q.id,
+      text: q.text,
+      options: (q.options || []).map(({ correct, ...option }) => option)
+    }))
+  });
+});
 
-  if (!enrollment.viewedModuleIds?.includes(module.id)) {
-    return res.status(400).json({
+app.post('/api/v1/modules/:courseId/:moduleId/quiz', requireAuth, allow('LEARNER'), async (req, res) => {
+  const courseRes = await query('SELECT * FROM courses WHERE id = $1', [req.params.courseId]);
+  if (!courseRes.rows.length) {
+    return res.status(404).json({
       success: false,
-      message: 'Mark the module content as read first'
+      message: 'Course not found'
+    });
+  }
+  const course = ensureCourseIds(mapCourse(courseRes.rows[0]));
+  const module = course.modules.find(m => m.id === req.params.moduleId) || course.modules[0];
+  if (!module) {
+    return res.status(404).json({
+      success: false,
+      message: 'Module not found'
     });
   }
 
@@ -1168,16 +1432,7 @@ app.post('/api/v1/modules/:courseId/:moduleId/quiz', requireAuth, allow('LEARNER
     q => req.body.answers?.[q.id] && q.options.find(o => o.id === req.body.answers[q.id])?.correct
   );
 
-  enrollment.passedQuizIds ||= [];
-  if (passed) {
-    module.quiz.forEach(q => {
-      if (!enrollment.passedQuizIds.includes(q.id)) {
-        enrollment.passedQuizIds.push(q.id);
-      }
-    });
-  }
-
-  response(
+  return response(
     res,
     { passed, score: passed ? 100 : 0 },
     passed ? 'Module quiz passed' : 'Review the content and try again'
@@ -1185,29 +1440,33 @@ app.post('/api/v1/modules/:courseId/:moduleId/quiz', requireAuth, allow('LEARNER
 });
 
 // Assessment endpoints
-app.get('/api/v1/assessments/:id', requireAuth, (req, res) => {
-  const assessment = db.assessments.find(a => a.id === req.params.id);
-  if (!assessment) {
+app.get('/api/v1/assessments/:id', requireAuth, async (req, res) => {
+  const asmtRes = await query('SELECT * FROM assessments WHERE id = $1', [req.params.id]);
+  if (!asmtRes.rows.length) {
     return res.status(404).json({
       success: false,
       message: 'Assessment not found'
     });
   }
+  const assessment = mapAssessment(asmtRes.rows[0]);
 
-  const userAttempts = db.attempts.filter(
-    a => a.assessmentId === assessment.id && a.userId === req.user.id
+  const attemptsRes = await query(
+    'SELECT * FROM attempts WHERE assessment_id = $1 AND user_id = $2 ORDER BY submitted_at ASC',
+    [assessment.id, req.user.id]
   );
+  const userAttempts = attemptsRes.rows.map(mapAttempt);
+
   const maxAttempts = Number(assessment.maxAttempts || 3);
   const attemptsTaken = userAttempts.length;
   const remainingAttempts = Math.max(0, maxAttempts - attemptsTaken);
   const highestScore = userAttempts.length ? Math.max(...userAttempts.map(a => a.score)) : null;
   const passed = userAttempts.some(a => a.passed);
 
-  response(res, {
+  return response(res, {
     ...assessment,
     questions: assessment.questions.map(q => ({
       ...q,
-      options: q.options.map(({ correct, ...option }) => option)
+      options: (q.options || []).map(({ correct, ...option }) => option)
     })),
     attemptsTaken,
     maxAttempts,
@@ -1218,50 +1477,68 @@ app.get('/api/v1/assessments/:id', requireAuth, (req, res) => {
   });
 });
 
-app.patch('/api/v1/assessments/:id', requireAuth, allow('COMPANY'), (req, res) => {
-  const assessment = db.assessments.find(item => item.id === req.params.id);
-  const course = db.courses.find(item => item.assessmentId === req.params.id);
-  if (!assessment || !course || !ownsCourse(req, course)) {
+app.patch('/api/v1/assessments/:id', requireAuth, allow('COMPANY'), async (req, res) => {
+  const asmtRes = await query('SELECT * FROM assessments WHERE id = $1', [req.params.id]);
+  if (!asmtRes.rows.length) {
+    return res.status(404).json({
+      success: false,
+      message: 'Owned assessment not found'
+    });
+  }
+  const assessment = mapAssessment(asmtRes.rows[0]);
+
+  const courseRes = await query('SELECT * FROM courses WHERE assessment_id = $1 OR id = $2', [
+    assessment.id,
+    assessment.courseId
+  ]);
+  const course = courseRes.rows.length ? mapCourse(courseRes.rows[0]) : null;
+  if (!course || !ownsCourse(req, course)) {
     return res.status(404).json({
       success: false,
       message: 'Owned assessment not found'
     });
   }
 
-  Object.assign(assessment, {
-    title: req.body.title ?? assessment.title,
-    description: req.body.description ?? assessment.description,
-    passingScore: Number(req.body.passingScore ?? assessment.passingScore),
-    maxAttempts: Number(req.body.maxAttempts ?? assessment.maxAttempts),
-    timeLimit: req.body.timeLimit ?? assessment.timeLimit,
-    randomizeQuestions: req.body.randomizeQuestions ?? assessment.randomizeQuestions,
-    showAnswersAfterSubmission: req.body.showAnswersAfterSubmission ?? assessment.showAnswersAfterSubmission,
-    questions: req.body.questions
-      ? req.body.questions.map(question => ({
-          ...question,
-          id: question.id || id(),
-          marks: Number(question.marks || 1),
-          type: question.type || 'SINGLE'
-        }))
-      : assessment.questions
-  });
+  const title = req.body.title ?? assessment.title;
+  const passingScore = Number(req.body.passingScore ?? assessment.passingScore);
+  const maxAttempts = Number(req.body.maxAttempts ?? assessment.maxAttempts);
+  const questions = req.body.questions
+    ? req.body.questions.map(question => ({
+        ...question,
+        id: question.id || id(),
+        marks: Number(question.marks || 1),
+        type: question.type || 'SINGLE'
+      }))
+    : assessment.questions;
 
-  response(res, assessment, 'Assessment updated');
+  const updateRes = await query(
+    `UPDATE assessments SET title = $1, passing_score = $2, max_attempts = $3, questions = $4 WHERE id = $5 RETURNING *`,
+    [title, passingScore, maxAttempts, JSON.stringify(questions), assessment.id]
+  );
+  const updatedAssessment = mapAssessment(updateRes.rows[0]);
+
+  const memIdx = (db.assessments || []).findIndex(a => a.id === updatedAssessment.id);
+  if (memIdx >= 0) db.assessments[memIdx] = updatedAssessment;
+
+  return response(res, updatedAssessment, 'Assessment updated');
 });
 
 app.post('/api/v1/assessments/:id/submit', requireAuth, allow('LEARNER'), async (req, res) => {
-  const assessment = db.assessments.find(a => a.id === req.params.id);
-  if (!assessment) {
+  const asmtRes = await query('SELECT * FROM assessments WHERE id = $1', [req.params.id]);
+  if (!asmtRes.rows.length) {
     return res.status(404).json({
       success: false,
       message: 'Assessment not found'
     });
   }
+  const assessment = mapAssessment(asmtRes.rows[0]);
 
   const maxAttempts = Number(assessment.maxAttempts || 3);
-  const priorAttempts = db.attempts.filter(
-    a => a.assessmentId === assessment.id && a.userId === req.user.id
+  const priorAttemptsRes = await query(
+    'SELECT * FROM attempts WHERE assessment_id = $1 AND user_id = $2 ORDER BY submitted_at ASC',
+    [assessment.id, req.user.id]
   );
+  const priorAttempts = priorAttemptsRes.rows.map(mapAttempt);
 
   if (priorAttempts.length >= maxAttempts) {
     return res.status(400).json({
@@ -1278,7 +1555,7 @@ app.post('/api/v1/assessments/:id/submit', requireAuth, allow('LEARNER'), async 
   let earnedMarks = 0;
   assessment.questions.forEach(q => {
     const answer = req.body.answers?.[q.id];
-    const correct = q.options
+    const correct = (q.options || [])
       .filter(o => o.correct)
       .map(o => o.id)
       .sort()
@@ -1291,52 +1568,85 @@ app.post('/api/v1/assessments/:id/submit', requireAuth, allow('LEARNER'), async 
 
   const score = maxMarks ? Math.round((earnedMarks / maxMarks) * 100) : 0;
   const isPassed = score >= assessment.passingScore;
+  const attemptNumber = priorAttempts.length + 1;
 
   const attempt = {
     id: id(),
-    assessmentId: assessment.id,
     userId: req.user.id,
+    assessmentId: assessment.id,
     score,
     earnedMarks,
     maxMarks,
     passed: isPassed,
+    attemptNumber,
+    answers: req.body.answers || {},
     submittedAt: now()
   };
+
+  await query(
+    `INSERT INTO attempts (id, user_id, assessment_id, score, passed, answers, attempt_number, submitted_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())`,
+    [
+      attempt.id,
+      attempt.userId,
+      attempt.assessmentId,
+      attempt.score,
+      attempt.passed,
+      JSON.stringify(attempt.answers),
+      attempt.attemptNumber
+    ]
+  );
+
+  db.attempts = db.attempts || [];
   db.attempts.push(attempt);
 
-  const allUserAttempts = db.attempts.filter(
-    a => a.assessmentId === assessment.id && a.userId === req.user.id
-  );
+  const allUserAttempts = [...priorAttempts, attempt];
   const highestScore = Math.max(...allUserAttempts.map(a => a.score));
   const hasEverPassed = allUserAttempts.some(a => a.passed);
 
-  const course = db.courses.find(item => item.assessmentId === assessment.id);
-  const enrollment =
-    course &&
-    db.enrollments.find(item => item.courseId === course.id && item.userId === req.user.id);
+  const courseRes = await query(
+    'SELECT * FROM courses WHERE assessment_id = $1 OR id = $2',
+    [assessment.id, assessment.courseId]
+  );
+  const course = courseRes.rows.length ? mapCourse(courseRes.rows[0]) : null;
+
+  let enrollment = null;
+  if (course) {
+    const enrRes = await query(
+      'SELECT * FROM enrollments WHERE course_id = $1 AND user_id = $2',
+      [course.id, req.user.id]
+    );
+    if (enrRes.rows.length) {
+      enrollment = mapEnrollment(enrRes.rows[0]);
+    }
+  }
 
   const allModulesDone =
     course &&
     enrollment &&
     course.modules.length > 0 &&
-    course.modules.every(m => enrollment.completedModuleIds?.includes(m.id));
+    course.modules.every(m => (enrollment.completedModules || []).includes(m.id));
 
   let certificate = null;
-  // If the learner has passed and course modules are completed, issue or update the certificate with highestScore
   if (hasEverPassed && (enrollment?.status === 'COMPLETED' || allModulesDone)) {
     if (enrollment) {
+      await query(
+        `UPDATE enrollments SET status = 'COMPLETED', progress = 100, completed_at = COALESCE(completed_at, NOW()) WHERE id = $1`,
+        [enrollment.id]
+      );
       enrollment.status = 'COMPLETED';
       enrollment.progress = 100;
-      enrollment.completedAt = enrollment.completedAt || now();
     }
+    const userRes = await query('SELECT * FROM users WHERE id = $1', [req.user.id]);
+    const user = mapUser(userRes.rows[0]);
     certificate = await issueCertificate({
-      user: db.users.find(user => user.id === req.user.id),
+      user,
       course,
       score: highestScore
     });
   }
 
-  notify(
+  await notify(
     req.user.id,
     'Assessment result',
     `You scored ${score}% (Attempt ${allUserAttempts.length}/${maxAttempts}). Maximum score: ${highestScore}%. ${
@@ -1344,13 +1654,13 @@ app.post('/api/v1/assessments/:id/submit', requireAuth, allow('LEARNER'), async 
     }`
   );
 
-  audit(req, 'ASSESSMENT_SUBMISSION', 'ASSESSMENT', assessment.id, {
+  await audit(req, 'ASSESSMENT_SUBMISSION', 'ASSESSMENT', assessment.id, {
     score,
     highestScore,
     attemptNumber: allUserAttempts.length
   });
 
-  response(
+  return response(
     res,
     {
       ...attempt,
@@ -1365,32 +1675,56 @@ app.post('/api/v1/assessments/:id/submit', requireAuth, allow('LEARNER'), async 
 });
 
 // Certification eligibility & Issuing
-app.get('/api/v1/certifications/eligibility/:courseId', requireAuth, allow('LEARNER'), (req, res) => {
-  const course = db.courses.find(c => c.id === req.params.courseId);
-  const enrollment = db.enrollments.find(e => e.courseId === course.id && e.userId === req.user.id);
-  const passed = db.attempts.some(
-    a => a.userId === req.user.id && a.passed && a.assessmentId === course.assessmentId
-  );
+app.get('/api/v1/certifications/eligibility/:courseId', requireAuth, allow('LEARNER'), async (req, res) => {
+  const courseRes = await query('SELECT * FROM courses WHERE id = $1', [req.params.courseId]);
+  if (!courseRes.rows.length) {
+    return res.status(404).json({ success: false, message: 'Course not found' });
+  }
+  const course = mapCourse(courseRes.rows[0]);
 
-  response(
+  const enrRes = await query(
+    'SELECT * FROM enrollments WHERE course_id = $1 AND user_id = $2',
+    [course.id, req.user.id]
+  );
+  const enrollment = enrRes.rows.length ? mapEnrollment(enrRes.rows[0]) : { completedModuleIds: [] };
+
+  const attemptsRes = await query(
+    'SELECT * FROM attempts WHERE user_id = $1 AND passed = true AND assessment_id = $2',
+    [req.user.id, course.assessmentId]
+  );
+  const passed = attemptsRes.rows.length > 0;
+
+  return response(
     res,
     new CertificationEligibilityService().evaluate({
       course,
-      enrollment: enrollment || { completedModuleIds: [] },
+      enrollment,
       assessmentPassed: passed
     })
   );
 });
 
 app.post('/api/v1/certificates/issue/:courseId', requireAuth, allow('LEARNER'), async (req, res) => {
-  const course = db.courses.find(c => c.id === req.params.courseId);
-  const enrollment = course && db.enrollments.find(e => e.courseId === course.id && e.userId === req.user.id);
-  const userAttempts = course
-    ? db.attempts.filter(a => a.userId === req.user.id && a.assessmentId === course.assessmentId)
-    : [];
+  const courseRes = await query('SELECT * FROM courses WHERE id = $1', [req.params.courseId]);
+  if (!courseRes.rows.length) {
+    return res.status(404).json({ success: false, message: 'Course not found' });
+  }
+  const course = mapCourse(courseRes.rows[0]);
+
+  const enrRes = await query(
+    'SELECT * FROM enrollments WHERE course_id = $1 AND user_id = $2',
+    [course.id, req.user.id]
+  );
+  const enrollment = enrRes.rows.length ? mapEnrollment(enrRes.rows[0]) : null;
+
+  const attemptsRes = await query(
+    'SELECT * FROM attempts WHERE user_id = $1 AND assessment_id = $2',
+    [req.user.id, course.assessmentId]
+  );
+  const userAttempts = attemptsRes.rows.map(mapAttempt);
   const passed = userAttempts.some(a => a.passed);
 
-  if (!course || enrollment?.status !== 'COMPLETED' || !passed) {
+  if (enrollment?.status !== 'COMPLETED' || !passed) {
     return res.status(400).json({
       success: false,
       message: 'Certificate is generated automatically only after course completion and a passing final assessment'
@@ -1398,36 +1732,44 @@ app.post('/api/v1/certificates/issue/:courseId', requireAuth, allow('LEARNER'), 
   }
 
   const highestScore = Math.max(...userAttempts.map(a => a.score));
+  const userRes = await query('SELECT * FROM users WHERE id = $1', [req.user.id]);
+  const user = mapUser(userRes.rows[0]);
 
   const certificate = await issueCertificate({
-    user: db.users.find(u => u.id === req.user.id),
+    user,
     course,
     score: highestScore
   });
 
-  response(res, certificate, 'Certificate available');
+  return response(res, certificate, 'Certificate available');
 });
 
-app.get('/api/v1/certificates/me', requireAuth, (req, res) =>
-  response(res, db.certificates.filter(c => c.learnerId === req.user.id))
-);
+app.get('/api/v1/certificates/me', requireAuth, async (req, res) => {
+  const { rows } = await query(
+    'SELECT * FROM certificates WHERE learner_id = $1 ORDER BY issued_date DESC',
+    [req.user.id]
+  );
+  return response(res, rows.map(mapCertificate));
+});
 
 app.get('/api/v1/certificates/:certificateId/pdf', async (req, res) => {
-  const query = String(req.params.certificateId || '').trim().toLowerCase();
-  const certificate = db.certificates.find(item => {
-    const certId = String(item.certificateId || '').trim().toLowerCase();
-    const certNum = String(item.certificateNumber || '').trim().toLowerCase();
-    const idVal = String(item.id || '').trim().toLowerCase();
-    return certId === query || certNum === query || idVal === query;
-  });
+  const queryStr = String(req.params.certificateId || '').trim().toLowerCase();
+  const { rows } = await query(
+    `SELECT * FROM certificates
+     WHERE LOWER(certificate_id) = LOWER($1)
+        OR LOWER(certificate_number) = LOWER($1)
+        OR LOWER(id) = LOWER($1)`,
+    [queryStr]
+  );
 
-  if (!certificate) {
+  if (!rows.length) {
     return res.status(404).json({
       success: false,
       message: 'Certificate not found'
     });
   }
 
+  const certificate = mapCertificate(rows[0]);
   try {
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename=${certificate.certificateId}.pdf`);
@@ -1458,20 +1800,21 @@ const handleCertificateVerification = async (req, res) => {
     return response(res, cached);
   }
 
-  const certificate = db.certificates.find(item => {
-    const itemCertId = String(item.certificateId || '').trim().toLowerCase();
-    const itemCertNum = String(item.certificateNumber || '').trim().toLowerCase();
-    const itemId = String(item.id || '').trim().toLowerCase();
-    return itemCertId === normalizedQuery || itemCertNum === normalizedQuery || itemId === normalizedQuery;
-  });
+  const { rows } = await query(
+    `SELECT * FROM certificates
+     WHERE LOWER(certificate_id) = LOWER($1)
+        OR LOWER(certificate_number) = LOWER($1)
+        OR LOWER(id) = LOWER($1)`,
+    [normalizedQuery]
+  );
 
-  db.verifications.push({
-    id: id(),
-    certificateId: certificate ? certificate.certificateId : rawQuery,
-    searchedQuery: rawQuery,
-    requestedAt: now(),
-    ip: req.ip
-  });
+  const certificate = rows.length ? mapCertificate(rows[0]) : null;
+
+  await query(
+    `INSERT INTO verifications (id, certificate_id, searched_query, requested_at, ip)
+     VALUES ($1, $2, $3, NOW(), $4)`,
+    [id(), certificate ? certificate.certificateId : rawQuery, rawQuery, req.ip || null]
+  );
 
   if (!certificate) {
     return res.status(404).json({
@@ -1480,7 +1823,7 @@ const handleCertificateVerification = async (req, res) => {
     });
   }
 
-  audit(req, 'CERTIFICATE_VERIFICATION', 'CERTIFICATE', certificate.id);
+  await audit(req, 'CERTIFICATE_VERIFICATION', 'CERTIFICATE', certificate.id);
   const result = {
     valid: certificate.status === 'VALID',
     status: certificate.status,
@@ -1506,204 +1849,319 @@ app.get('/api/v1/verify/certificate/:certificateId', handleCertificateVerificati
 app.get('/api/v1/verify/:certificateId', handleCertificateVerification);
 
 app.post('/api/v1/certificates/:id/revoke', requireAuth, allow('ADMIN', 'COMPANY'), async (req, res) => {
-  const certificate = db.certificates.find(c => c.id === req.params.id || c.certificateId === req.params.id);
-  if (!certificate || !req.body.reason) {
+  if (!req.body.reason) {
     return res.status(400).json({
       success: false,
       message: 'Certificate and revocation reason are required'
     });
   }
 
-  certificate.status = 'REVOKED';
-  certificate.revocation = {
+  const { rows } = await query(
+    'SELECT * FROM certificates WHERE id = $1 OR certificate_id = $1',
+    [req.params.id]
+  );
+
+  if (!rows.length) {
+    return res.status(404).json({
+      success: false,
+      message: 'Certificate not found'
+    });
+  }
+
+  const revocation = {
     reason: req.body.reason,
     actorId: req.user.id,
     timestamp: now()
   };
 
-  await invalidateCached(`certificate:${certificate.certificateId}`);
-  audit(req, 'CERTIFICATE_REVOKED', 'CERTIFICATE', certificate.id, certificate.revocation);
-  notify(certificate.learnerId, 'Certificate revoked', 'Your certificate status has changed.');
-  response(res, certificate, 'Certificate revoked');
+  const updateRes = await query(
+    `UPDATE certificates SET status = 'REVOKED', revocation = $1 WHERE id = $2 RETURNING *`,
+    [JSON.stringify(revocation), rows[0].id]
+  );
+  const certificate = mapCertificate(updateRes.rows[0]);
+
+  await invalidateCached(`certificate:${certificate.certificateId.toLowerCase()}`);
+  await audit(req, 'CERTIFICATE_REVOKED', 'CERTIFICATE', certificate.id, revocation);
+  await notify(certificate.learnerId, 'Certificate revoked', 'Your certificate status has changed.');
+
+  const memIdx = (db.certificates || []).findIndex(c => c.id === certificate.id);
+  if (memIdx >= 0) db.certificates[memIdx] = certificate;
+
+  return response(res, certificate, 'Certificate revoked');
 });
 
 // General portal dashboards
-app.get('/api/v1/dashboard', requireAuth, (req, res) => {
-  const enrollments = db.enrollments.filter(e => e.userId === req.user.id);
-  response(res, {
-    user: publicUser(db.users.find(u => u.id === req.user.id)),
-    enrollments: enrollments.map(e => ({
-      ...e,
-      course: db.courses.find(c => c.id === e.courseId)
-    })),
-    certificates: db.certificates.filter(c => c.learnerId === req.user.id),
-    notifications: db.notifications.filter(n => n.userId === req.user.id).slice(-5)
+app.get('/api/v1/dashboard', requireAuth, async (req, res) => {
+  const [userRes, enrollmentsRes, certificatesRes, notificationsRes] = await Promise.all([
+    query('SELECT * FROM users WHERE id = $1', [req.user.id]),
+    query(
+      `SELECT e.*, c.id AS c_id, c.title AS c_title, c.description AS c_description,
+              c.thumbnail AS c_thumbnail, c.category AS c_category, c.difficulty AS c_difficulty,
+              c.duration AS c_duration, c.instructor_name AS c_instructor_name,
+              c.modules AS c_modules, c.assessment_id AS c_assessment_id, c.status AS c_status
+       FROM enrollments e
+       JOIN courses c ON e.course_id = c.id
+       WHERE e.user_id = $1
+       ORDER BY e.started_at DESC`,
+      [req.user.id]
+    ),
+    query('SELECT * FROM certificates WHERE learner_id = $1 ORDER BY issued_date DESC', [req.user.id]),
+    query('SELECT * FROM notifications WHERE user_id = $1 ORDER BY created_at DESC LIMIT 5', [req.user.id])
+  ]);
+
+  const user = userRes.rows.length ? mapUser(userRes.rows[0]) : req.user;
+  const enrollments = enrollmentsRes.rows.map(r => {
+    const e = mapEnrollment(r);
+    e.course = {
+      id: r.c_id,
+      title: r.c_title,
+      description: r.c_description,
+      thumbnail: r.c_thumbnail,
+      category: r.c_category,
+      difficulty: r.c_difficulty,
+      duration: r.c_duration,
+      instructorName: r.c_instructor_name,
+      modules: r.c_modules,
+      assessmentId: r.c_assessment_id,
+      status: r.c_status
+    };
+    return e;
+  });
+
+  return response(res, {
+    user: publicUser(user),
+    enrollments,
+    certificates: certificatesRes.rows.map(mapCertificate),
+    notifications: notificationsRes.rows.map(mapNotification)
   });
 });
 
-app.get('/api/v1/notifications', requireAuth, (req, res) =>
-  response(res, db.notifications.filter(n => n.userId === req.user.id).reverse())
-);
+app.get('/api/v1/notifications', requireAuth, async (req, res) => {
+  const { rows } = await query(
+    'SELECT * FROM notifications WHERE user_id = $1 ORDER BY created_at DESC',
+    [req.user.id]
+  );
+  return response(res, rows.map(mapNotification));
+});
 
-app.get('/api/v1/companies', (req, res) => response(res, db.companies));
+app.get('/api/v1/companies', async (req, res) => {
+  const { rows } = await query('SELECT * FROM companies ORDER BY name ASC');
+  return response(res, rows.map(mapCompany));
+});
 
-const formatAuditLog = log => {
-  const actor = log.actorId ? db.users.find(u => u.id === log.actorId) : null;
-  return {
-    ...log,
-    userName: log.userName || log.metadata?.userName || actor?.name || 'System',
-    userRole: log.userRole || log.metadata?.userRole || actor?.role || 'SYSTEM'
-  };
-};
-
-app.get('/api/v1/audit', requireAuth, allow('ADMIN'), (req, res) =>
-  response(res, db.auditLogs.slice().reverse().map(formatAuditLog))
-);
+app.get('/api/v1/audit', requireAuth, allow('ADMIN'), async (req, res) => {
+  const { rows } = await query('SELECT * FROM audit_logs ORDER BY timestamp DESC LIMIT 500');
+  return response(res, rows.map(mapAuditLog));
+});
 
 // Admin portal endpoints
-app.get('/api/v1/admin/overview', requireAuth, allow('ADMIN'), (req, res) =>
-  response(res, {
-    learners: db.users.filter(u => u.role === 'LEARNER').length,
-    companies: db.companies.length,
-    courses: db.courses.length,
-    enrollments: db.enrollments.length,
-    certificates: db.certificates.length,
-    revoked: db.certificates.filter(c => c.status === 'REVOKED').length,
-    verifications: db.verifications.length,
-    pendingCompanies: (db.pendingCompanyRegistrations || []).length,
-    auditLogs: db.auditLogs.slice(-20).reverse().map(formatAuditLog)
-  })
+app.get('/api/v1/admin/overview', requireAuth, allow('ADMIN'), async (req, res) => {
+  const [
+    learnersCountRes,
+    companiesCountRes,
+    coursesCountRes,
+    enrollmentsCountRes,
+    certificatesCountRes,
+    revokedCountRes,
+    verificationsCountRes,
+    pendingCompaniesCountRes,
+    auditLogsRes
+  ] = await Promise.all([
+    query("SELECT COUNT(*) AS count FROM users WHERE role = 'LEARNER'"),
+    query('SELECT COUNT(*) AS count FROM companies'),
+    query('SELECT COUNT(*) AS count FROM courses'),
+    query('SELECT COUNT(*) AS count FROM enrollments'),
+    query('SELECT COUNT(*) AS count FROM certificates'),
+    query("SELECT COUNT(*) AS count FROM certificates WHERE status = 'REVOKED'"),
+    query('SELECT COUNT(*) AS count FROM verifications'),
+    query("SELECT COUNT(*) AS count FROM pending_company_registrations WHERE status = 'PENDING'"),
+    query('SELECT * FROM audit_logs ORDER BY timestamp DESC LIMIT 20')
+  ]);
+
+  return response(res, {
+    learners: parseInt(learnersCountRes.rows[0]?.count || 0, 10),
+    companies: parseInt(companiesCountRes.rows[0]?.count || 0, 10),
+    courses: parseInt(coursesCountRes.rows[0]?.count || 0, 10),
+    enrollments: parseInt(enrollmentsCountRes.rows[0]?.count || 0, 10),
+    certificates: parseInt(certificatesCountRes.rows[0]?.count || 0, 10),
+    revoked: parseInt(revokedCountRes.rows[0]?.count || 0, 10),
+    verifications: parseInt(verificationsCountRes.rows[0]?.count || 0, 10),
+    pendingCompanies: parseInt(pendingCompaniesCountRes.rows[0]?.count || 0, 10),
+    auditLogs: auditLogsRes.rows.map(mapAuditLog)
+  });
+});
+
+app.get(
+  ['/api/v1/admin/pending-companies', '/api/v1/admin/pending-approvals'],
+  requireAuth,
+  allow('ADMIN'),
+  async (req, res) => {
+    const { rows } = await query(
+      "SELECT * FROM pending_company_registrations WHERE status = 'PENDING' ORDER BY created_at ASC"
+    );
+    const list = rows.map(p => ({
+      id: p.id,
+      name: p.name,
+      email: p.email,
+      companyName: p.company_name || '',
+      role: p.role || 'COMPANY',
+      status: p.status || 'PENDING',
+      createdAt: p.created_at
+    }));
+    return response(res, list);
+  }
 );
 
-app.get(['/api/v1/admin/pending-companies', '/api/v1/admin/pending-approvals'], requireAuth, allow('ADMIN'), (req, res) => {
-  const list = (db.pendingCompanyRegistrations || []).map(p => ({
-    id: p.id,
-    name: p.name,
-    email: p.email,
-    companyName: p.companyName || '',
-    role: p.role || 'COMPANY',
-    status: p.status || 'PENDING',
-    createdAt: p.createdAt
-  }));
-  response(res, list);
-});
-
-app.post(['/api/v1/admin/pending-companies/:id/approve', '/api/v1/admin/pending-approvals/:id/approve'], requireAuth, allow('ADMIN'), async (req, res) => {
-  const pendingId = req.params.id;
-  const pending = (db.pendingCompanyRegistrations || []).find(p => p.id === pendingId);
-  if (!pending) {
-    return res.status(404).json({
-      success: false,
-      message: 'Pending registration not found'
-    });
-  }
-
-  let company = null;
-  let companyId = null;
-
-  // 1. If role is COMPANY, create company record
-  if (pending.role === 'COMPANY') {
-    company = {
-      id: id(),
-      name: pending.companyName || `${pending.name}'s Company`,
-      description: '',
-      website: ''
-    };
-    await query(
-      `INSERT INTO companies (id, name, description, website) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING`,
-      [company.id, company.name, company.description, company.website]
+app.post(
+  ['/api/v1/admin/pending-companies/:id/approve', '/api/v1/admin/pending-approvals/:id/approve'],
+  requireAuth,
+  allow('ADMIN'),
+  async (req, res) => {
+    const pendingId = req.params.id;
+    const { rows: pendingRows } = await query(
+      'SELECT * FROM pending_company_registrations WHERE id = $1',
+      [pendingId]
     );
-    db.companies.push(company);
-    companyId = company.id;
-  }
 
-  // 2. Create user record with approved role (COMPANY or HR)
-  const user = {
-    id: id(),
-    name: pending.name,
-    email: pending.email,
-    passwordHash: pending.passwordHash,
-    role: pending.role || 'COMPANY',
-    companyId,
-    active: true
-  };
-  await query(
-    `INSERT INTO users (id, name, email, password_hash, role, company_id, active) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-    [user.id, user.name, user.email, user.passwordHash, user.role, user.companyId, user.active]
-  );
-  db.users.push(user);
+    if (!pendingRows.length) {
+      return res.status(404).json({
+        success: false,
+        message: 'Pending registration not found'
+      });
+    }
 
-  // 3. Remove from pending list
-  db.pendingCompanyRegistrations = db.pendingCompanyRegistrations.filter(p => p.id !== pendingId);
-  await query('DELETE FROM pending_company_registrations WHERE id = $1', [pendingId]);
-  persistDatabase().catch(err => console.error('Database sync error on approve:', err.message));
+    const pending = mapPendingCompany(pendingRows[0]);
+    let company = null;
+    let companyId = null;
 
-  audit(req, `${user.role}_APPROVED`, 'USER', user.id, {
-    approvedRole: user.role,
-    companyName: company?.name || pending.companyName || null,
-    approvedUserName: user.name,
-    approvedUserEmail: user.email,
-    userName: req.user.name,
-    userRole: req.user.role
-  });
+    if (pending.role === 'COMPANY') {
+      company = {
+        id: id(),
+        name: pending.companyName || `${pending.name}'s Company`,
+        description: '',
+        website: ''
+      };
+      await query(
+        `INSERT INTO companies (id, name, description, website) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING`,
+        [company.id, company.name, company.description, company.website]
+      );
+      companyId = company.id;
+      db.companies = db.companies || [];
+      db.companies.push(company);
+    }
 
-  return response(
-    res,
-    {
-      company,
-      user: publicUser(user)
-    },
-    `${user.role} account for "${user.name}" approved successfully. User added to database.`
-  );
-});
+    const user = {
+      id: id(),
+      name: pending.name,
+      email: pending.email,
+      passwordHash: pending.passwordHash,
+      role: pending.role || 'COMPANY',
+      companyId,
+      active: true
+    };
 
-app.post(['/api/v1/admin/pending-companies/:id/reject', '/api/v1/admin/pending-approvals/:id/reject'], requireAuth, allow('ADMIN'), async (req, res) => {
-  const pendingId = req.params.id;
-  const pending = (db.pendingCompanyRegistrations || []).find(p => p.id === pendingId);
-  if (!pending) {
-    return res.status(404).json({
-      success: false,
-      message: 'Pending registration not found'
+    await query(
+      `INSERT INTO users (id, name, email, password_hash, role, company_id, active, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())`,
+      [user.id, user.name, user.email, user.passwordHash, user.role, user.companyId, user.active]
+    );
+
+    db.users = db.users || [];
+    db.users.push(user);
+
+    await query('DELETE FROM pending_company_registrations WHERE id = $1', [pendingId]);
+    db.pendingCompanyRegistrations = (db.pendingCompanyRegistrations || []).filter(p => p.id !== pendingId);
+
+    await audit(req, `${user.role}_APPROVED`, 'USER', user.id, {
+      approvedRole: user.role,
+      companyName: company?.name || pending.companyName || null,
+      approvedUserName: user.name,
+      approvedUserEmail: user.email,
+      userName: req.user.name,
+      userRole: req.user.role
     });
+
+    return response(
+      res,
+      {
+        company,
+        user: publicUser(user)
+      },
+      `${user.role} account for "${user.name}" approved successfully. User added to database.`
+    );
   }
+);
 
-  db.pendingCompanyRegistrations = db.pendingCompanyRegistrations.filter(p => p.id !== pendingId);
-  await query('DELETE FROM pending_company_registrations WHERE id = $1', [pendingId]);
-  persistDatabase().catch(err => console.error('Database sync error on reject:', err.message));
+app.post(
+  ['/api/v1/admin/pending-companies/:id/reject', '/api/v1/admin/pending-approvals/:id/reject'],
+  requireAuth,
+  allow('ADMIN'),
+  async (req, res) => {
+    const pendingId = req.params.id;
+    const { rows: pendingRows } = await query(
+      'SELECT * FROM pending_company_registrations WHERE id = $1',
+      [pendingId]
+    );
 
-  audit(req, `${pending.role || 'USER'}_REJECTED`, 'REGISTRATION_PENDING', pendingId, {
-    rejectedRole: pending.role,
-    rejectedCompanyName: pending.companyName,
-    rejectedUserName: pending.name,
-    rejectedEmail: pending.email,
-    userName: req.user.name,
-    userRole: req.user.role
-  });
+    if (!pendingRows.length) {
+      return res.status(404).json({
+        success: false,
+        message: 'Pending registration not found'
+      });
+    }
 
-  return response(res, { id: pendingId }, `Registration request for "${pending.name}" (${pending.role}) rejected.`);
-});
+    const pending = mapPendingCompany(pendingRows[0]);
+    await query('DELETE FROM pending_company_registrations WHERE id = $1', [pendingId]);
+    db.pendingCompanyRegistrations = (db.pendingCompanyRegistrations || []).filter(p => p.id !== pendingId);
 
-app.get('/api/v1/admin/users', requireAuth, allow('ADMIN'), (req, res) => {
-  const users = db.users.map(u => ({
+    await audit(req, `${pending.role || 'USER'}_REJECTED`, 'REGISTRATION_PENDING', pendingId, {
+      rejectedRole: pending.role,
+      rejectedCompanyName: pending.companyName,
+      rejectedUserName: pending.name,
+      rejectedEmail: pending.email,
+      userName: req.user.name,
+      userRole: req.user.role
+    });
+
+    return response(
+      res,
+      { id: pendingId },
+      `Registration request for "${pending.name}" (${pending.role}) rejected.`
+    );
+  }
+);
+
+app.get('/api/v1/admin/users', requireAuth, allow('ADMIN'), async (req, res) => {
+  const { rows } = await query(
+    `SELECT u.id, u.name, u.email, u.role, u.active, u.company_id, c.name AS company_name
+     FROM users u
+     LEFT JOIN companies c ON u.company_id = c.id
+     ORDER BY u.created_at ASC`
+  );
+
+  const users = rows.map(u => ({
     id: u.id,
     name: u.name,
     email: u.email,
     role: u.role,
     active: u.active ?? true,
-    companyId: u.companyId,
-    companyName: db.companies.find(c => c.id === u.companyId)?.name || null
+    companyId: u.company_id,
+    companyName: u.company_name || null
   }));
-  response(res, users);
+
+  return response(res, users);
 });
 
 app.patch('/api/v1/admin/users/:id', requireAuth, allow('ADMIN'), async (req, res) => {
-  const user = db.users.find(u => u.id === req.params.id);
-  if (!user) {
+  const { rows } = await query('SELECT * FROM users WHERE id = $1', [req.params.id]);
+  if (!rows.length) {
     return res.status(404).json({
       success: false,
       message: 'User not found'
     });
   }
+
+  const user = mapUser(rows[0]);
 
   // Admin cannot change user roles
   if (req.body.role !== undefined) {
@@ -1722,31 +2180,29 @@ app.patch('/api/v1/admin/users/:id', requireAuth, allow('ADMIN'), async (req, re
     }
     user.active = req.body.active;
     await query('UPDATE users SET active = $1 WHERE id = $2', [user.active, user.id]);
-    persistDatabase().catch(err => console.error('Database sync error on status update:', err.message));
+    const memUser = (db.users || []).find(u => u.id === user.id);
+    if (memUser) memUser.active = user.active;
   }
 
-  audit(req, 'USER_UPDATED', 'USER', user.id, {
+  await audit(req, 'USER_UPDATED', 'USER', user.id, {
     active: user.active
   });
 
-  response(res, publicUser(user), 'User updated successfully');
+  return response(res, publicUser(user), 'User updated successfully');
 });
 
 app.delete('/api/v1/admin/users/:id', requireAuth, allow('ADMIN'), async (req, res) => {
   const userId = req.params.id;
-  const user = db.users.find(u => u.id === userId);
+  const { rows } = await query('SELECT * FROM users WHERE id = $1', [userId]);
 
-  let targetUser = user;
-  if (!targetUser) {
-    const { rows } = await query('SELECT * FROM users WHERE id = $1', [userId]);
-    if (!rows || rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'User not found'
-      });
-    }
-    targetUser = rows[0];
+  if (!rows.length) {
+    return res.status(404).json({
+      success: false,
+      message: 'User not found'
+    });
   }
+
+  const targetUser = mapUser(rows[0]);
 
   // Prevent deleting primary admin account
   if (targetUser.role === 'ADMIN' || targetUser.id === 'u-admin' || targetUser.email === 'admin@example.com') {
@@ -1764,23 +2220,15 @@ app.delete('/api/v1/admin/users/:id', requireAuth, allow('ADMIN'), async (req, r
     });
   }
 
-  // 1. Delete from PostgreSQL database
   await query('DELETE FROM users WHERE id = $1', [userId]);
 
-  // 2. Delete from in-memory db
-  const userIdx = db.users.findIndex(u => u.id === userId);
-  if (userIdx !== -1) {
-    db.users.splice(userIdx, 1);
-  }
-  db.enrollments = db.enrollments.filter(e => e.userId !== userId);
-  db.attempts = db.attempts.filter(a => a.userId !== userId);
-  db.certificates = db.certificates.filter(c => c.learnerId !== userId);
-  db.notifications = db.notifications.filter(n => n.userId !== userId);
+  db.users = (db.users || []).filter(u => u.id !== userId);
+  db.enrollments = (db.enrollments || []).filter(e => e.userId !== userId);
+  db.attempts = (db.attempts || []).filter(a => a.userId !== userId);
+  db.certificates = (db.certificates || []).filter(c => c.learnerId !== userId);
+  db.notifications = (db.notifications || []).filter(n => n.userId !== userId);
 
-  // 3. Persist changes to database if connected
-  persistDatabase().catch(err => console.error('Database sync error on delete:', err.message));
-
-  audit(req, 'USER_DELETED', 'USER', userId, {
+  await audit(req, 'USER_DELETED', 'USER', userId, {
     email: targetUser.email,
     name: targetUser.name,
     role: targetUser.role
@@ -1789,41 +2237,42 @@ app.delete('/api/v1/admin/users/:id', requireAuth, allow('ADMIN'), async (req, r
   return response(res, { id: userId }, 'User permanently deleted from database');
 });
 
-app.get('/api/v1/admin/certificates', requireAuth, allow('ADMIN'), (req, res) =>
-  response(res, db.certificates.slice().reverse())
-);
+app.get('/api/v1/admin/certificates', requireAuth, allow('ADMIN'), async (req, res) => {
+  const { rows } = await query('SELECT * FROM certificates ORDER BY issued_date DESC');
+  return response(res, rows.map(mapCertificate));
+});
 
 // HR portal endpoints
-app.get('/api/v1/hr/overview', requireAuth, allow('HR', 'ADMIN'), (req, res) => {
-  const validCertificates = db.certificates.filter(c => c.status === 'VALID').length;
-  const revokedCertificates = db.certificates.filter(c => c.status === 'REVOKED').length;
-  response(res, {
-    certificatesCount: db.certificates.length,
-    validCertificates,
-    revokedCertificates,
-    verificationsCount: db.verifications.length,
-    recentCertificates: db.certificates.slice(-10).reverse(),
-    recentVerifications: db.verifications.slice(-10).reverse()
+app.get('/api/v1/hr/overview', requireAuth, allow('HR', 'ADMIN'), async (req, res) => {
+  const [
+    totalCertsRes,
+    validCertsRes,
+    revokedCertsRes,
+    totalVerifsRes,
+    recentCertsRes,
+    recentVerifsRes
+  ] = await Promise.all([
+    query('SELECT COUNT(*) AS count FROM certificates'),
+    query("SELECT COUNT(*) AS count FROM certificates WHERE status = 'VALID'"),
+    query("SELECT COUNT(*) AS count FROM certificates WHERE status = 'REVOKED'"),
+    query('SELECT COUNT(*) AS count FROM verifications'),
+    query('SELECT * FROM certificates ORDER BY issued_date DESC LIMIT 10'),
+    query('SELECT * FROM verifications ORDER BY requested_at DESC LIMIT 10')
+  ]);
+
+  return response(res, {
+    certificatesCount: parseInt(totalCertsRes.rows[0]?.count || 0, 10),
+    validCertificates: parseInt(validCertsRes.rows[0]?.count || 0, 10),
+    revokedCertificates: parseInt(revokedCertsRes.rows[0]?.count || 0, 10),
+    verificationsCount: parseInt(totalVerifsRes.rows[0]?.count || 0, 10),
+    recentCertificates: recentCertsRes.rows.map(mapCertificate),
+    recentVerifications: recentVerifsRes.rows.map(mapVerification)
   });
 });
 
-app.get('/api/v1/hr/certificates', requireAuth, allow('HR', 'ADMIN'), (req, res) => {
-  const certificates = db.certificates
-    .map(c => ({
-      id: c.id,
-      certificateId: c.certificateId,
-      certificateNumber: c.certificateNumber,
-      learnerName: c.learnerName,
-      courseName: c.courseName,
-      certification: c.certification,
-      issuedBy: c.issuedBy,
-      status: c.status,
-      score: c.score,
-      issuedDate: c.issuedDate,
-      pdfUrl: c.pdfUrl
-    }))
-    .reverse();
-  response(res, certificates);
+app.get('/api/v1/hr/certificates', requireAuth, allow('HR', 'ADMIN'), async (req, res) => {
+  const { rows } = await query('SELECT * FROM certificates ORDER BY issued_date DESC');
+  return response(res, rows.map(mapCertificate));
 });
 
 // Error handler

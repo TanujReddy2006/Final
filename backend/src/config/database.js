@@ -31,11 +31,25 @@ export const db = {
   pendingCompanyRegistrations: []
 };
 
+let initPromise = null;
+
 export function isDatabaseConnected() {
   return enabled && !!pool;
 }
 
+export async function ensureDatabase() {
+  if (!pool && !initPromise) {
+    initPromise = initDatabase();
+  }
+  if (initPromise) {
+    await initPromise;
+  }
+}
+
 export async function query(text, params) {
+  if (!pool) {
+    await ensureDatabase();
+  }
   if (pool && enabled) {
     return pool.query(text, params);
   }
@@ -436,210 +450,58 @@ export async function initDatabase() {
   }
 }
 
-export async function persistDatabase() {
+export {
+  mapCompany,
+  mapUser,
+  mapEnrollment,
+  mapAssessment,
+  mapAttempt,
+  mapCertificate,
+  mapVerification,
+  mapAuditLog,
+  mapPendingCompany,
+  mapNotification
+};
+
+export async function syncDbCache() {
   if (!pool || !enabled) return;
   try {
-    for (const c of db.companies) {
-      await pool.query(
-        `INSERT INTO companies (id, name, description, website)
-         VALUES ($1, $2, $3, $4)
-         ON CONFLICT (id) DO UPDATE SET
-           name = EXCLUDED.name,
-           description = EXCLUDED.description,
-           website = EXCLUDED.website`,
-        [c.id, c.name, c.description || null, c.website || null]
-      );
-    }
+    const [comps, usrs, crss, enrls, asmts, atmts, crts, vrfs, adts, ntfs, pndg] = await Promise.all([
+      pool.query('SELECT * FROM companies ORDER BY created_at ASC'),
+      pool.query('SELECT * FROM users ORDER BY created_at ASC'),
+      pool.query('SELECT * FROM courses ORDER BY created_at ASC'),
+      pool.query('SELECT * FROM enrollments ORDER BY started_at ASC'),
+      pool.query('SELECT * FROM assessments ORDER BY created_at ASC'),
+      pool.query('SELECT * FROM attempts ORDER BY submitted_at ASC'),
+      pool.query('SELECT * FROM certificates ORDER BY issued_date ASC'),
+      pool.query('SELECT * FROM verifications ORDER BY requested_at ASC'),
+      pool.query('SELECT * FROM audit_logs ORDER BY timestamp ASC'),
+      pool.query('SELECT * FROM notifications ORDER BY created_at ASC'),
+      pool.query('SELECT * FROM pending_company_registrations ORDER BY created_at ASC')
+    ]);
 
-    for (const u of db.users) {
-      await pool.query(
-        `INSERT INTO users (id, name, email, password_hash, role, company_id, active)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
-         ON CONFLICT (id) DO UPDATE SET
-           name = EXCLUDED.name,
-           email = EXCLUDED.email,
-           role = EXCLUDED.role,
-           active = EXCLUDED.active,
-           company_id = EXCLUDED.company_id`,
-        [u.id, u.name, u.email, u.passwordHash, u.role, u.companyId || null, u.active ?? true]
-      );
-    }
-
-    for (const c of db.courses) {
-      await pool.query(
-        `INSERT INTO courses (
-           id, title, description, detailed_description, thumbnail, category, difficulty, duration,
-           instructor_name, instructor_bio, prerequisites, learning_objectives, target_audience,
-           status, company_id, modules, skills, assessment_id, video_url
-         )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
-         ON CONFLICT (id) DO UPDATE SET
-           title = EXCLUDED.title,
-           description = EXCLUDED.description,
-           detailed_description = EXCLUDED.detailed_description,
-           thumbnail = EXCLUDED.thumbnail,
-           category = EXCLUDED.category,
-           difficulty = EXCLUDED.difficulty,
-           duration = EXCLUDED.duration,
-           instructor_name = EXCLUDED.instructor_name,
-           instructor_bio = EXCLUDED.instructor_bio,
-           prerequisites = EXCLUDED.prerequisites,
-           learning_objectives = EXCLUDED.learning_objectives,
-           target_audience = EXCLUDED.target_audience,
-           status = EXCLUDED.status,
-           modules = EXCLUDED.modules,
-           skills = EXCLUDED.skills,
-           assessment_id = EXCLUDED.assessment_id,
-           video_url = EXCLUDED.video_url,
-           updated_at = NOW()`,
-        [
-          c.id,
-          c.title,
-          c.description,
-          c.detailedDescription || null,
-          c.thumbnail || null,
-          c.category || null,
-          c.difficulty || null,
-          c.duration || null,
-          c.instructorName || null,
-          c.instructorBio || null,
-          c.prerequisites || null,
-          JSON.stringify(c.learningObjectives || []),
-          c.targetAudience || null,
-          c.status || 'DRAFT',
-          c.companyId,
-          JSON.stringify(c.modules || []),
-          JSON.stringify(c.skills || []),
-          c.assessmentId || null,
-          c.videoUrl || c.video_url || null
-        ]
-      );
-    }
-
-    for (const e of db.enrollments) {
-      const completedModules = e.completedModuleIds || e.completedModules || [];
-      const completedLessons = e.completedLessonIds || e.completedLessons || [];
-      await pool.query(
-        `INSERT INTO enrollments (id, user_id, course_id, progress, status, completed_modules, completed_lessons, started_at, completed_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-         ON CONFLICT (id) DO UPDATE SET
-           progress = EXCLUDED.progress,
-           status = EXCLUDED.status,
-           completed_modules = EXCLUDED.completed_modules,
-           completed_lessons = EXCLUDED.completed_lessons,
-           completed_at = EXCLUDED.completed_at`,
-        [
-          e.id,
-          e.userId,
-          e.courseId,
-          e.progress || 0,
-          e.status || 'IN_PROGRESS',
-          JSON.stringify(completedModules),
-          JSON.stringify(completedLessons),
-          e.startedAt || new Date(),
-          e.completedAt || null
-        ]
-      );
-    }
-
-    for (const a of db.assessments) {
-      await pool.query(
-        `INSERT INTO assessments (id, course_id, title, passing_score, max_attempts, questions)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         ON CONFLICT (id) DO UPDATE SET
-           title = EXCLUDED.title,
-           passing_score = EXCLUDED.passing_score,
-           max_attempts = EXCLUDED.max_attempts,
-           questions = EXCLUDED.questions`,
-        [a.id, a.courseId, a.title, a.passingScore || 70, a.maxAttempts || 3, JSON.stringify(a.questions || [])]
-      );
-    }
-
-    for (const at of db.attempts) {
-      await pool.query(
-        `INSERT INTO attempts (id, user_id, assessment_id, score, passed, answers, attempt_number, submitted_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-         ON CONFLICT (id) DO NOTHING`,
-        [at.id, at.userId, at.assessmentId, at.score, at.passed, JSON.stringify(at.answers || {}), at.attemptNumber || 1, at.submittedAt || new Date()]
-      );
-    }
-
-    for (const cert of db.certificates) {
-      await pool.query(
-        `INSERT INTO certificates (
-           id, certificate_id, certificate_number, learner_id, learner_name, course_id, course_name,
-           certification, issued_by, score, completion_date, issued_date, expiry_date,
-           verification_url, pdf_url, status, skills, revocation
-         )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
-         ON CONFLICT (id) DO UPDATE SET
-           score = EXCLUDED.score,
-           status = EXCLUDED.status,
-           revocation = EXCLUDED.revocation`,
-        [
-          cert.id,
-          cert.certificateId,
-          cert.certificateNumber,
-          cert.learnerId,
-          cert.learnerName,
-          cert.courseId,
-          cert.courseName,
-          cert.certification,
-          cert.issuedBy,
-          cert.score,
-          cert.completionDate || new Date(),
-          cert.issuedDate || new Date(),
-          cert.expiryDate || null,
-          cert.verificationUrl,
-          cert.pdfUrl,
-          cert.status || 'VALID',
-          JSON.stringify(cert.skills || []),
-          cert.revocation ? JSON.stringify(cert.revocation) : null
-        ]
-      );
-    }
-
-    for (const v of db.verifications) {
-      await pool.query(
-        `INSERT INTO verifications (id, certificate_id, searched_query, requested_at, ip)
-         VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (id) DO NOTHING`,
-        [v.id, v.certificateId, v.searchedQuery || null, v.requestedAt || new Date(), v.ip || null]
-      );
-    }
-
-    for (const log of db.auditLogs) {
-      await pool.query(
-        `INSERT INTO audit_logs (id, actor_id, action, entity_type, entity_id, timestamp, status, metadata, ip)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-         ON CONFLICT (id) DO NOTHING`,
-        [log.id, log.actorId || null, log.action, log.entityType, log.entityId, log.timestamp || new Date(), log.status || 'SUCCESS', JSON.stringify(log.metadata || {}), log.ip || null]
-      );
-    }
-
-    for (const n of db.notifications) {
-      await pool.query(
-        `INSERT INTO notifications (id, user_id, title, body, read, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         ON CONFLICT (id) DO UPDATE SET read = EXCLUDED.read`,
-        [n.id, n.userId, n.title, n.body, n.read ?? false, n.createdAt || new Date()]
-      );
-    }
-
-    for (const p of (db.pendingCompanyRegistrations || [])) {
-      await pool.query(
-        `INSERT INTO pending_company_registrations (id, name, email, password_hash, company_name, role, status, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-         ON CONFLICT (id) DO UPDATE SET
-           status = EXCLUDED.status,
-           role = EXCLUDED.role`,
-        [p.id, p.name, p.email, p.passwordHash, p.companyName || null, p.role || 'COMPANY', p.status || 'PENDING', p.createdAt || new Date()]
-      );
-    }
-  } catch (error) {
-    console.warn(`PostgreSQL persistence error: ${error.message}`);
+    db.companies = comps.rows.map(mapCompany);
+    db.users = usrs.rows.map(mapUser);
+    db.courses = crss.rows.map(mapCourse);
+    db.enrollments = enrls.rows.map(mapEnrollment);
+    db.assessments = asmts.rows.map(mapAssessment);
+    db.attempts = atmts.rows.map(mapAttempt);
+    db.certificates = crts.rows.map(mapCertificate);
+    db.verifications = vrfs.rows.map(mapVerification);
+    db.auditLogs = adts.rows.map(mapAuditLog);
+    db.notifications = ntfs.rows.map(mapNotification);
+    db.pendingCompanyRegistrations = pndg.rows.map(mapPendingCompany);
+  } catch (err) {
+    console.warn(`syncDbCache error: ${err.message}`);
   }
 }
+
+export async function persistDatabase() {
+  // All state is now directly persisted to PostgreSQL via SQL queries.
+  // Maintained as a lightweight cache sync for backward compatibility.
+  await syncDbCache().catch(() => {});
+}
+
 
 export const isDatabaseEnabled = () => enabled;
 export const getPool = () => pool;
