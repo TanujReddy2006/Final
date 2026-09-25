@@ -750,7 +750,7 @@ test('company registration requires admin approval before details enter database
   assert.equal(regRes.status, 200);
   assert.equal(regRes.body.success, true);
   assert.equal(regRes.body.pendingApproval, true);
-  assert.ok(regRes.body.message.includes('Administrator approval is required'));
+  assert.ok(regRes.body.message.includes('sent to the administrator for approval'));
 
   // 2. Verify user and company are NOT in the active database or db.users
   const userInDb = db.users.find(u => u.email === testEmail);
@@ -842,6 +842,59 @@ test('company registration requires admin approval before details enter database
   assert.ok(approvedLog, 'Should have logged COMPANY_APPROVED');
   assert.equal(approvedLog.userName, 'Riley Admin');
   assert.equal(approvedLog.userRole, 'ADMIN');
+
+  // 9. Register a new user with HR role (also requires admin approval)
+  const hrEmail = `pending_hr_${Date.now()}@example.com`;
+  const hrName = 'Marcus Brody';
+
+  const hrRegRes = await request(app).post('/api/v1/auth/register').send({
+    name: hrName,
+    email: hrEmail,
+    password: 'Password@123',
+    role: 'HR'
+  });
+
+  assert.equal(hrRegRes.status, 200);
+  assert.equal(hrRegRes.body.success, true);
+  assert.equal(hrRegRes.body.pendingApproval, true);
+  assert.equal(hrRegRes.body.data.role, 'HR');
+
+  // HR is not in db.users before approval
+  assert.equal(db.users.find(u => u.email === hrEmail), undefined);
+
+  // HR login is blocked while pending (403)
+  const hrPendingLogin = await request(app).post('/api/v1/auth/login').send({
+    email: hrEmail,
+    password: 'Password@123'
+  });
+  assert.equal(hrPendingLogin.status, 403);
+  assert.ok(hrPendingLogin.body.message.includes('awaiting administrator approval'));
+
+  // Admin approves HR registration
+  const pendingApprovalsRes = await request(app)
+    .get('/api/v1/admin/pending-approvals')
+    .set(adminHeaders);
+  const pendingHr = pendingApprovalsRes.body.data.find(p => p.email === hrEmail);
+  assert.ok(pendingHr, 'Pending HR registration must appear in admin approvals list');
+  assert.equal(pendingHr.role, 'HR');
+
+  const approveHrRes = await request(app)
+    .post(`/api/v1/admin/pending-approvals/${pendingHr.id}/approve`)
+    .set(adminHeaders);
+  assert.equal(approveHrRes.status, 200);
+  assert.equal(approveHrRes.body.data.user.role, 'HR');
+
+  // HR is now active in database and can log in
+  const approvedHrUser = db.users.find(u => u.email === hrEmail);
+  assert.ok(approvedHrUser, 'Approved HR user must now exist in users database');
+  assert.equal(approvedHrUser.role, 'HR');
+
+  const hrLoginSuccess = await request(app).post('/api/v1/auth/login').send({
+    email: hrEmail,
+    password: 'Password@123'
+  });
+  assert.equal(hrLoginSuccess.status, 200);
+  assert.equal(hrLoginSuccess.body.data.user.role, 'HR');
 });
 
 

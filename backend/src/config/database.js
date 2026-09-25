@@ -177,7 +177,8 @@ const DDL_STATEMENTS = `
     name VARCHAR(255) NOT NULL,
     email VARCHAR(255) UNIQUE NOT NULL,
     password_hash VARCHAR(255) NOT NULL,
-    company_name VARCHAR(255) NOT NULL,
+    company_name VARCHAR(255),
+    role VARCHAR(50) NOT NULL DEFAULT 'COMPANY',
     status VARCHAR(50) NOT NULL DEFAULT 'PENDING',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
   );
@@ -328,7 +329,8 @@ const mapPendingCompany = r => ({
   name: r.name,
   email: r.email,
   passwordHash: r.password_hash,
-  companyName: r.company_name,
+  companyName: r.company_name || '',
+  role: r.role || 'COMPANY',
   status: r.status || 'PENDING',
   createdAt: r.created_at
 });
@@ -366,6 +368,8 @@ export async function initDatabase() {
     await pool.query(`
       ALTER TABLE courses ADD COLUMN IF NOT EXISTS video_url VARCHAR(500);
       ALTER TABLE courses ADD COLUMN IF NOT EXISTS detailed_description TEXT;
+      ALTER TABLE pending_company_registrations ADD COLUMN IF NOT EXISTS role VARCHAR(50) NOT NULL DEFAULT 'COMPANY';
+      ALTER TABLE pending_company_registrations ALTER COLUMN company_name DROP NOT NULL;
     `).catch(() => {});
 
     // Seed default companies and users if not already present
@@ -624,11 +628,12 @@ export async function persistDatabase() {
 
     for (const p of (db.pendingCompanyRegistrations || [])) {
       await pool.query(
-        `INSERT INTO pending_company_registrations (id, name, email, password_hash, company_name, status, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
+        `INSERT INTO pending_company_registrations (id, name, email, password_hash, company_name, role, status, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
          ON CONFLICT (id) DO UPDATE SET
-           status = EXCLUDED.status`,
-        [p.id, p.name, p.email, p.passwordHash, p.companyName, p.status || 'PENDING', p.createdAt || new Date()]
+           status = EXCLUDED.status,
+           role = EXCLUDED.role`,
+        [p.id, p.name, p.email, p.passwordHash, p.companyName || null, p.role || 'COMPANY', p.status || 'PENDING', p.createdAt || new Date()]
       );
     }
   } catch (error) {

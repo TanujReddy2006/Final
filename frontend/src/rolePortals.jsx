@@ -933,26 +933,26 @@ export function AdminUsers() {
     load();
   }, []);
 
-  const approveCompany = async (pendingId, companyName) => {
+  const approvePending = async (pendingId, displayName, role) => {
     try {
-      await unwrap(api.post(`/admin/pending-companies/${pendingId}/approve`));
-      setMessage(`Company "${companyName}" approved successfully and added to the database.`);
+      await unwrap(api.post(`/admin/pending-approvals/${pendingId}/approve`));
+      setMessage(`${role === 'HR' ? 'HR / Employer' : 'Company'} account "${displayName}" approved successfully and added to the database.`);
       load();
     } catch (err) {
-      setMessage(err.response?.data?.message || 'Failed to approve company registration');
+      setMessage(err.response?.data?.message || 'Failed to approve registration');
     }
   };
 
-  const rejectCompany = async (pendingId, companyName) => {
-    if (!window.confirm(`Reject registration request for "${companyName}"?`)) {
+  const rejectPending = async (pendingId, displayName, role) => {
+    if (!window.confirm(`Reject registration request for "${displayName}" (${role})?`)) {
       return;
     }
     try {
-      await unwrap(api.post(`/admin/pending-companies/${pendingId}/reject`));
-      setMessage(`Company registration for "${companyName}" rejected.`);
+      await unwrap(api.post(`/admin/pending-approvals/${pendingId}/reject`));
+      setMessage(`Registration request for "${displayName}" (${role}) rejected.`);
       load();
     } catch (err) {
-      setMessage(err.response?.data?.message || 'Failed to reject company registration');
+      setMessage(err.response?.data?.message || 'Failed to reject registration');
     }
   };
 
@@ -989,7 +989,7 @@ export function AdminUsers() {
       <Title
         eyebrow="ADMIN PORTAL"
         title="People & Accounts"
-        sub="Review pending company registrations, manage registered accounts, and control system access."
+        sub="Review pending Company and HR registrations, manage registered accounts, and control system access."
       />
 
       <div className="catalog-tools" style={{ marginBottom: '20px' }}>
@@ -1009,12 +1009,12 @@ export function AdminUsers() {
         </div>
       )}
 
-      {/* Pending Company Approvals Section */}
+      {/* Pending Account Approvals Section (Company & HR) */}
       <section className="panel table-panel" style={{ marginBottom: '28px' }}>
         <div className="panel-heading">
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             <Building2 size={18} />
-            <h3>Pending Company Approvals ({pendingCompanies.length})</h3>
+            <h3>Pending Account Approvals ({pendingCompanies.length})</h3>
           </div>
           <span className={pendingCompanies.length ? 'status-badge invalid' : 'status-badge'}>
             {pendingCompanies.length ? `${pendingCompanies.length} AWAITING APPROVAL` : 'ALL CAUGHT UP'}
@@ -1025,9 +1025,13 @@ export function AdminUsers() {
           pendingCompanies.map(p => (
             <div className="table-row" key={p.id}>
               <div>
-                <strong>{p.companyName}</strong>
+                <strong>{p.role === 'COMPANY' ? p.companyName : p.name}</strong>
                 <small className="muted" style={{ display: 'block', marginTop: '2px' }}>
-                  Applicant: <strong>{p.name}</strong> · {p.email}
+                  {p.role === 'COMPANY' ? (
+                    <>Applicant: <strong>{p.name}</strong> · {p.email}</>
+                  ) : (
+                    <>HR Account · {p.email}{p.companyName ? ` · ${p.companyName}` : ''}</>
+                  )}
                 </small>
               </div>
 
@@ -1037,15 +1041,15 @@ export function AdminUsers() {
                     display: 'inline-block',
                     padding: '4px 10px',
                     borderRadius: '5px',
-                    background: '#fef3c7',
-                    border: '1px solid #fde68a',
+                    background: p.role === 'HR' ? '#ede9fe' : '#fef3c7',
+                    border: p.role === 'HR' ? '1px solid #ddd6fe' : '1px solid #fde68a',
                     fontWeight: 600,
                     fontSize: '11px',
                     letterSpacing: '0.4px',
-                    color: '#92400e'
+                    color: p.role === 'HR' ? '#5b21b6' : '#92400e'
                   }}
                 >
-                  PENDING APPROVAL
+                  {p.role === 'HR' ? 'HR PENDING' : 'COMPANY PENDING'}
                 </span>
               </div>
 
@@ -1067,8 +1071,8 @@ export function AdminUsers() {
                     alignItems: 'center',
                     gap: '4px'
                   }}
-                  onClick={() => approveCompany(p.id, p.companyName)}
-                  title="Approve company registration and add to database"
+                  onClick={() => approvePending(p.id, p.companyName || p.name, p.role || 'COMPANY')}
+                  title="Approve registration and add user to database"
                 >
                   <UserCheck size={13} /> Approve
                 </button>
@@ -1086,8 +1090,8 @@ export function AdminUsers() {
                     alignItems: 'center',
                     gap: '4px'
                   }}
-                  onClick={() => rejectCompany(p.id, p.companyName)}
-                  title="Reject company registration"
+                  onClick={() => rejectPending(p.id, p.companyName || p.name, p.role || 'COMPANY')}
+                  title="Reject registration"
                 >
                   <X size={13} /> Reject
                 </button>
@@ -1097,7 +1101,7 @@ export function AdminUsers() {
         ) : (
           <div style={{ padding: '24px 20px', textAlign: 'center', color: 'var(--muted)' }}>
             <p style={{ margin: 0, fontSize: '13px' }}>
-              No company registrations awaiting approval. New company registrations will appear here for administrator verification.
+              No registrations awaiting approval. New Company and HR registrations will appear here for administrator verification.
             </p>
           </div>
         )}

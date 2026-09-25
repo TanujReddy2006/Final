@@ -130,6 +130,7 @@ function Auth({ onAuthenticate, initialRegister = false }) {
   const [fieldErrors, setFieldErrors] = useState({});
   const [serverError, setServerError] = useState('');
   const [pendingNotice, setPendingNotice] = useState('');
+  const [pendingModal, setPendingModal] = useState(null);
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
@@ -137,6 +138,7 @@ function Auth({ onAuthenticate, initialRegister = false }) {
     setFieldErrors({});
     setServerError('');
     setPendingNotice('');
+    setPendingModal(null);
     if (initialRegister) {
       setForm({ email: '', password: '', name: '', role: 'LEARNER', companyName: '' });
     } else {
@@ -178,6 +180,11 @@ function Auth({ onAuthenticate, initialRegister = false }) {
     return Object.keys(errors).length === 0;
   };
 
+  const dismissPendingModal = () => {
+    setPendingModal(null);
+    navigate('/signin');
+  };
+
   const submit = async e => {
     e.preventDefault();
     setServerError('');
@@ -205,9 +212,16 @@ function Auth({ onAuthenticate, initialRegister = false }) {
       );
 
       if (res?.pendingApproval) {
+        setPendingModal({
+          name: form.name.trim(),
+          email: form.email.trim().toLowerCase(),
+          role: form.role,
+          companyName: form.companyName?.trim() || '',
+          message: res.message
+        });
         setPendingNotice(
           res.message ||
-            'Company registration submitted successfully. An administrator must approve your company account before you can sign in.'
+            'Your registration request has been sent to the administrator. You will be able to sign in once an administrator approves your account.'
         );
         setRegister(false);
         setFieldErrors({});
@@ -219,7 +233,6 @@ function Auth({ onAuthenticate, initialRegister = false }) {
           role: 'LEARNER',
           companyName: ''
         });
-        navigate('/signin');
       }
     } catch (err) {
       setServerError(err.response?.data?.message || 'Unable to complete account action');
@@ -233,6 +246,7 @@ function Auth({ onAuthenticate, initialRegister = false }) {
     setFieldErrors({});
     setServerError('');
     setPendingNotice('');
+    setPendingModal(null);
     navigate(toRegister ? '/register' : '/signin');
     if (toRegister) {
       // Clear prefilled demo credentials for new registration
@@ -257,6 +271,120 @@ function Auth({ onAuthenticate, initialRegister = false }) {
 
   return (
     <main className="auth">
+      {pendingModal && (
+        <div
+          className="modal-backdrop"
+          onClick={dismissPendingModal}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="approval-modal-title"
+        >
+          <div className="modal-card" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <span
+                  style={{
+                    width: '34px',
+                    height: '34px',
+                    borderRadius: '50%',
+                    background: '#eefaf3',
+                    border: '1px solid #c3edd2',
+                    color: '#15803d',
+                    display: 'grid',
+                    placeItems: 'center'
+                  }}
+                >
+                  <CheckCircle2 size={18} />
+                </span>
+                <div>
+                  <h3 id="approval-modal-title" style={{ margin: 0, fontSize: '18px' }}>
+                    Request Sent to Admin
+                  </h3>
+                  <small className="muted">Administrator approval required</small>
+                </div>
+              </div>
+              <button
+                type="button"
+                className="modal-close"
+                onClick={dismissPendingModal}
+                aria-label="Close modal"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="modal-body" style={{ gap: '14px' }}>
+              <p style={{ margin: 0, fontSize: '14px', lineHeight: '1.5', color: 'var(--ink)' }}>
+                Your request to register as{' '}
+                <strong>{pendingModal.role === 'HR' ? 'an HR / Employer' : 'a Company Provider'}</strong>{' '}
+                has been submitted and sent to the platform administrator for approval.
+              </p>
+
+              <div
+                style={{
+                  background: 'var(--paper)',
+                  border: '1px solid var(--line)',
+                  borderRadius: '8px',
+                  padding: '14px 16px',
+                  display: 'grid',
+                  gap: '8px',
+                  fontSize: '13px'
+                }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span className="muted">Applicant:</span>
+                  <strong>{pendingModal.name}</strong>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span className="muted">Email:</span>
+                  <code>{pendingModal.email}</code>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span className="muted">Role Requested:</span>
+                  <span
+                    style={{
+                      padding: '2px 8px',
+                      borderRadius: '4px',
+                      background: '#fef3c7',
+                      border: '1px solid #fde68a',
+                      fontWeight: 600,
+                      fontSize: '11px',
+                      color: '#92400e'
+                    }}
+                  >
+                    {pendingModal.role}
+                  </span>
+                </div>
+                {pendingModal.companyName && (
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span className="muted">Organization:</span>
+                    <strong>{pendingModal.companyName}</strong>
+                  </div>
+                )}
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span className="muted">Current Status:</span>
+                  <strong style={{ color: '#b45309' }}>Awaiting Admin Approval</strong>
+                </div>
+              </div>
+
+              <p className="muted" style={{ margin: 0, fontSize: '12.5px', lineHeight: '1.5' }}>
+                Once approved by an administrator, your details will be added to the database and you will be able to sign in with your credentials.
+              </p>
+            </div>
+
+            <div className="modal-footer">
+              <button
+                type="button"
+                className="button primary wide"
+                onClick={dismissPendingModal}
+                style={{ width: '100%' }}
+              >
+                Got it, Continue to Sign In
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <section className="auth-art">
         <Link to="/" className="brand" style={{ textDecoration: 'none', color: 'inherit' }}>
           <span className="brand-mark">L</span> learnforge

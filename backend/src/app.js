@@ -270,14 +270,15 @@ app.post('/api/v1/auth/register', async (req, res) => {
     });
   }
 
-  // When a user registers as COMPANY, require administrator approval before adding details to database
-  if (role === 'COMPANY') {
+  // When a user registers as COMPANY or HR, require administrator approval before adding details to database
+  if (role === 'COMPANY' || role === 'HR') {
     const pending = {
       id: id(),
       name,
       email,
       passwordHash: await bcrypt.hash(password, 10),
-      companyName: companyName || `${name}'s Company`,
+      companyName: role === 'COMPANY' ? (companyName || `${name}'s Company`) : (companyName || ''),
+      role,
       status: 'PENDING',
       createdAt: now()
     };
@@ -286,32 +287,36 @@ app.post('/api/v1/auth/register', async (req, res) => {
     db.pendingCompanyRegistrations.push(pending);
 
     await query(
-      `INSERT INTO pending_company_registrations (id, name, email, password_hash, company_name, status, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, now())`,
-      [pending.id, pending.name, pending.email, pending.passwordHash, pending.companyName, pending.status]
+      `INSERT INTO pending_company_registrations (id, name, email, password_hash, company_name, role, status, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, now())`,
+      [pending.id, pending.name, pending.email, pending.passwordHash, pending.companyName, pending.role, pending.status]
     );
-    persistDatabase().catch(err => console.error('Database sync error on company registration:', err.message));
+    persistDatabase().catch(err => console.error('Database sync error on registration:', err.message));
 
-    audit(req, 'COMPANY_REGISTRATION_PENDING', 'COMPANY_REGISTRATION', pending.id, {
+    audit(req, `${role}_REGISTRATION_PENDING`, 'REGISTRATION_PENDING', pending.id, {
       userName: pending.name,
-      userRole: 'COMPANY',
+      userRole: role,
       companyName: pending.companyName,
       email: pending.email
     });
 
+    const roleLabel = role === 'COMPANY' ? 'Company provider' : 'HR / employer';
     return res.status(200).json({
       success: true,
       pendingApproval: true,
-      message: 'Company registration submitted successfully. Administrator approval is required before you can sign in.',
+      role,
+      message: `${roleLabel} registration submitted successfully. Your request has been sent to the administrator for approval before you can sign in.`,
       data: {
         pendingApproval: true,
+        name: pending.name,
+        role: pending.role,
         email: pending.email,
         companyName: pending.companyName
       }
     });
   }
 
-  // Non-company accounts (LEARNER, HR) are registered immediately
+  // Non-company/HR accounts (LEARNER) are registered immediately
   const user = {
     id: id(),
     name,
@@ -355,14 +360,15 @@ app.post('/api/v1/auth/login', async (req, res) => {
     });
   }
 
-  // Check if company registration is pending approval
+  // Check if user registration is pending approval (COMPANY or HR)
   const pendingComp = (db.pendingCompanyRegistrations || []).find(
     p => p.email && p.email.toLowerCase() === email
   );
   if (pendingComp) {
+    const roleLabel = pendingComp.role === 'HR' ? 'HR / employer' : 'company';
     return res.status(403).json({
       success: false,
-      message: 'Your company registration is awaiting administrator approval. Please wait for an administrator to review and approve your account.'
+      message: `Your ${roleLabel} account registration is awaiting administrator approval. Please wait for an administrator to review and approve your account.`
     });
   }
 
@@ -1569,49 +1575,56 @@ app.get('/api/v1/admin/overview', requireAuth, allow('ADMIN'), (req, res) =>
   })
 );
 
-app.get('/api/v1/admin/pending-companies', requireAuth, allow('ADMIN'), (req, res) => {
+app.get(['/api/v1/admin/pending-companies', '/api/v1/admin/pending-approvals'], requireAuth, allow('ADMIN'), (req, res) => {
   const list = (db.pendingCompanyRegistrations || []).map(p => ({
     id: p.id,
     name: p.name,
     email: p.email,
-    companyName: p.companyName,
+    companyName: p.companyName || '',
+    role: p.role || 'COMPANY',
     status: p.status || 'PENDING',
     createdAt: p.createdAt
   }));
   response(res, list);
 });
 
-app.post('/api/v1/admin/pending-companies/:id/approve', requireAuth, allow('ADMIN'), async (req, res) => {
+app.post(['/api/v1/admin/pending-companies/:id/approve', '/api/v1/admin/pending-approvals/:id/approve'], requireAuth, allow('ADMIN'), async (req, res) => {
   const pendingId = req.params.id;
   const pending = (db.pendingCompanyRegistrations || []).find(p => p.id === pendingId);
   if (!pending) {
     return res.status(404).json({
       success: false,
-      message: 'Pending company registration not found'
+      message: 'Pending registration not found'
     });
   }
 
-  // 1. Create company record
-  const company = {
-    id: id(),
-    name: pending.companyName,
-    description: '',
-    website: ''
-  };
-  await query(
-    `INSERT INTO companies (id, name, description, website) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING`,
-    [company.id, company.name, company.description, company.website]
-  );
-  db.companies.push(company);
+  let company = null;
+  let companyId = null;
 
-  // 2. Create user record with COMPANY role
+  // 1. If role is COMPANY, create company record
+  if (pending.role === 'COMPANY') {
+    company = {
+      id: id(),
+      name: pending.companyName || `${pending.name}'s Company`,
+      description: '',
+      website: ''
+    };
+    await query(
+      `INSERT INTO companies (id, name, description, website) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING`,
+      [company.id, company.name, company.description, company.website]
+    );
+    db.companies.push(company);
+    companyId = company.id;
+  }
+
+  // 2. Create user record with approved role (COMPANY or HR)
   const user = {
     id: id(),
     name: pending.name,
     email: pending.email,
     passwordHash: pending.passwordHash,
-    role: 'COMPANY',
-    companyId: company.id,
+    role: pending.role || 'COMPANY',
+    companyId,
     active: true
   };
   await query(
@@ -1625,8 +1638,9 @@ app.post('/api/v1/admin/pending-companies/:id/approve', requireAuth, allow('ADMI
   await query('DELETE FROM pending_company_registrations WHERE id = $1', [pendingId]);
   persistDatabase().catch(err => console.error('Database sync error on approve:', err.message));
 
-  audit(req, 'COMPANY_APPROVED', 'COMPANY', company.id, {
-    companyName: company.name,
+  audit(req, `${user.role}_APPROVED`, 'USER', user.id, {
+    approvedRole: user.role,
+    companyName: company?.name || pending.companyName || null,
     approvedUserName: user.name,
     approvedUserEmail: user.email,
     userName: req.user.name,
@@ -1639,17 +1653,17 @@ app.post('/api/v1/admin/pending-companies/:id/approve', requireAuth, allow('ADMI
       company,
       user: publicUser(user)
     },
-    `Company "${company.name}" approved successfully. User account created.`
+    `${user.role} account for "${user.name}" approved successfully. User added to database.`
   );
 });
 
-app.post('/api/v1/admin/pending-companies/:id/reject', requireAuth, allow('ADMIN'), async (req, res) => {
+app.post(['/api/v1/admin/pending-companies/:id/reject', '/api/v1/admin/pending-approvals/:id/reject'], requireAuth, allow('ADMIN'), async (req, res) => {
   const pendingId = req.params.id;
   const pending = (db.pendingCompanyRegistrations || []).find(p => p.id === pendingId);
   if (!pending) {
     return res.status(404).json({
       success: false,
-      message: 'Pending company registration not found'
+      message: 'Pending registration not found'
     });
   }
 
@@ -1657,7 +1671,8 @@ app.post('/api/v1/admin/pending-companies/:id/reject', requireAuth, allow('ADMIN
   await query('DELETE FROM pending_company_registrations WHERE id = $1', [pendingId]);
   persistDatabase().catch(err => console.error('Database sync error on reject:', err.message));
 
-  audit(req, 'COMPANY_REJECTED', 'COMPANY_REGISTRATION', pendingId, {
+  audit(req, `${pending.role || 'USER'}_REJECTED`, 'REGISTRATION_PENDING', pendingId, {
+    rejectedRole: pending.role,
     rejectedCompanyName: pending.companyName,
     rejectedUserName: pending.name,
     rejectedEmail: pending.email,
@@ -1665,7 +1680,7 @@ app.post('/api/v1/admin/pending-companies/:id/reject', requireAuth, allow('ADMIN
     userRole: req.user.role
   });
 
-  return response(res, { id: pendingId }, `Company registration for "${pending.companyName}" rejected.`);
+  return response(res, { id: pendingId }, `Registration request for "${pending.name}" (${pending.role}) rejected.`);
 });
 
 app.get('/api/v1/admin/users', requireAuth, allow('ADMIN'), (req, res) => {
