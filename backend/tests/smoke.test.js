@@ -733,6 +733,117 @@ test('standard LMS adapter layer operates cleanly with Infosys Springboard provi
   assert.ok(Array.isArray(certRes.body.data));
 });
 
+test('company registration requires admin approval before details enter database, and logs show user name and role', async () => {
+  // 1. Register a new user with COMPANY role
+  const testEmail = `pending_co_${Date.now()}@example.com`;
+  const companyName = `Acme Training ${Date.now()}`;
+  const applicantName = 'Samantha Vance';
+
+  const regRes = await request(app).post('/api/v1/auth/register').send({
+    name: applicantName,
+    email: testEmail,
+    password: 'Password@123',
+    role: 'COMPANY',
+    companyName
+  });
+
+  assert.equal(regRes.status, 200);
+  assert.equal(regRes.body.success, true);
+  assert.equal(regRes.body.pendingApproval, true);
+  assert.ok(regRes.body.message.includes('Administrator approval is required'));
+
+  // 2. Verify user and company are NOT in the active database or db.users
+  const userInDb = db.users.find(u => u.email === testEmail);
+  assert.equal(userInDb, undefined, 'User must not be added to users table/list before approval');
+
+  const compInDb = db.companies.find(c => c.name === companyName);
+  assert.equal(compInDb, undefined, 'Company must not be added to companies table/list before approval');
+
+  // 3. Verify company cannot log in while pending approval (receives 403)
+  const pendingLoginRes = await request(app).post('/api/v1/auth/login').send({
+    email: testEmail,
+    password: 'Password@123'
+  });
+  assert.equal(pendingLoginRes.status, 403);
+  assert.equal(pendingLoginRes.body.success, false);
+  assert.ok(pendingLoginRes.body.message.includes('awaiting administrator approval'));
+
+  // 4. Admin logs in and checks pending companies list
+  const adminLogin = await request(app).post('/api/v1/auth/login').send({
+    email: 'admin@example.com',
+    password: 'Demo@123'
+  });
+  assert.equal(adminLogin.status, 200);
+  const adminToken = adminLogin.body.data.token;
+  const adminHeaders = { Authorization: `Bearer ${adminToken}` };
+
+  const pendingListRes = await request(app)
+    .get('/api/v1/admin/pending-companies')
+    .set(adminHeaders);
+  assert.equal(pendingListRes.status, 200);
+  assert.ok(Array.isArray(pendingListRes.body.data));
+
+  const pendingItem = pendingListRes.body.data.find(p => p.email === testEmail);
+  assert.ok(pendingItem, 'Pending registration should be visible to admin');
+  assert.equal(pendingItem.companyName, companyName);
+  assert.equal(pendingItem.name, applicantName);
+
+  // 5. Admin approves the company registration
+  const approveRes = await request(app)
+    .post(`/api/v1/admin/pending-companies/${pendingItem.id}/approve`)
+    .set(adminHeaders);
+  assert.equal(approveRes.status, 200);
+  assert.equal(approveRes.body.success, true);
+  assert.ok(approveRes.body.data.company);
+  assert.ok(approveRes.body.data.user);
+  assert.equal(approveRes.body.data.user.role, 'COMPANY');
+
+  // 6. User and company are now present in the database
+  const approvedUser = db.users.find(u => u.email === testEmail);
+  assert.ok(approvedUser, 'Approved user must now exist in users database');
+  assert.equal(approvedUser.role, 'COMPANY');
+  assert.equal(approvedUser.active, true);
+
+  const approvedCompany = db.companies.find(c => c.name === companyName);
+  assert.ok(approvedCompany, 'Approved company must now exist in companies database');
+
+  // 7. Approved user can now log in successfully
+  const loginRes = await request(app).post('/api/v1/auth/login').send({
+    email: testEmail,
+    password: 'Password@123'
+  });
+  assert.equal(loginRes.status, 200);
+  assert.ok(loginRes.body.data.token);
+  assert.equal(loginRes.body.data.user.email, testEmail);
+  assert.equal(loginRes.body.data.user.role, 'COMPANY');
+
+  // 8. Verify audit logs contain user name and user role
+  const auditRes = await request(app)
+    .get('/api/v1/admin/overview')
+    .set(adminHeaders);
+  assert.equal(auditRes.status, 200);
+  const logs = auditRes.body.data.auditLogs;
+  assert.ok(Array.isArray(logs));
+  assert.ok(logs.length > 0);
+
+  // All recent logs must have non-empty userName and userRole
+  for (const log of logs.slice(0, 5)) {
+    assert.ok(log.userName, `Log ${log.action} should have userName`);
+    assert.ok(log.userRole, `Log ${log.action} should have userRole`);
+  }
+
+  // Find the company registration and approval logs specifically
+  const pendingLog = logs.find(l => l.action === 'COMPANY_REGISTRATION_PENDING');
+  assert.ok(pendingLog, 'Should have logged COMPANY_REGISTRATION_PENDING');
+  assert.equal(pendingLog.userName, applicantName);
+  assert.equal(pendingLog.userRole, 'COMPANY');
+
+  const approvedLog = logs.find(l => l.action === 'COMPANY_APPROVED');
+  assert.ok(approvedLog, 'Should have logged COMPANY_APPROVED');
+  assert.equal(approvedLog.userName, 'Riley Admin');
+  assert.equal(approvedLog.userRole, 'ADMIN');
+});
+
 
 
 

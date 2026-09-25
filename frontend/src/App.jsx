@@ -54,10 +54,14 @@ function App() {
 
   const authenticate = async (endpoint, form) => {
     const data = await unwrap(api.post(endpoint, form));
+    if (data.pendingApproval) {
+      return data;
+    }
     localStorage.setItem('learnforge_token', data.token);
     localStorage.setItem('learnforge_user', JSON.stringify(data.user));
     setUser(data.user);
     navigate('/dashboard');
+    return data;
   };
 
   const logout = () => {
@@ -125,18 +129,20 @@ function Auth({ onAuthenticate, initialRegister = false }) {
   }));
   const [fieldErrors, setFieldErrors] = useState({});
   const [serverError, setServerError] = useState('');
+  const [pendingNotice, setPendingNotice] = useState('');
+  const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     setRegister(initialRegister);
     setFieldErrors({});
     setServerError('');
+    setPendingNotice('');
     if (initialRegister) {
       setForm({ email: '', password: '', name: '', role: 'LEARNER', companyName: '' });
     } else {
       setForm({ email: 'learner@example.com', password: 'Demo@123', name: '', role: 'LEARNER', companyName: '' });
     }
   }, [initialRegister]);
-  const [submitting, setSubmitting] = useState(false);
 
   const validate = () => {
     const errors = {};
@@ -182,7 +188,7 @@ function Auth({ onAuthenticate, initialRegister = false }) {
 
     setSubmitting(true);
     try {
-      await onAuthenticate(
+      const res = await onAuthenticate(
         register ? '/auth/register' : '/auth/login',
         register
           ? {
@@ -197,6 +203,24 @@ function Auth({ onAuthenticate, initialRegister = false }) {
               password: form.password
             }
       );
+
+      if (res?.pendingApproval) {
+        setPendingNotice(
+          res.message ||
+            'Company registration submitted successfully. An administrator must approve your company account before you can sign in.'
+        );
+        setRegister(false);
+        setFieldErrors({});
+        setServerError('');
+        setForm({
+          email: form.email.trim().toLowerCase(),
+          password: '',
+          name: '',
+          role: 'LEARNER',
+          companyName: ''
+        });
+        navigate('/signin');
+      }
     } catch (err) {
       setServerError(err.response?.data?.message || 'Unable to complete account action');
     } finally {
@@ -208,6 +232,7 @@ function Auth({ onAuthenticate, initialRegister = false }) {
     setRegister(toRegister);
     setFieldErrors({});
     setServerError('');
+    setPendingNotice('');
     navigate(toRegister ? '/register' : '/signin');
     if (toRegister) {
       // Clear prefilled demo credentials for new registration
@@ -265,6 +290,31 @@ function Auth({ onAuthenticate, initialRegister = false }) {
               ? 'Create an account to access guided pathways and verified credentials.'
               : 'Sign in to pick up where you left off.'}
           </p>
+
+          {pendingNotice && (
+            <div
+              className="read-state"
+              style={{
+                marginBottom: '18px',
+                background: '#eefaf3',
+                border: '1px solid #c3edd2',
+                color: '#135431',
+                padding: '12px 14px',
+                borderRadius: '8px',
+                fontSize: '13px',
+                lineHeight: '1.4',
+                display: 'flex',
+                gap: '10px',
+                alignItems: 'flex-start'
+              }}
+            >
+              <CheckCircle2 size={18} style={{ flexShrink: 0, marginTop: '2px', color: '#16a34a' }} />
+              <div>
+                <strong style={{ display: 'block', marginBottom: '2px' }}>Awaiting Admin Approval</strong>
+                <span>{pendingNotice}</span>
+              </div>
+            </div>
+          )}
 
           <form onSubmit={submit} noValidate>
             {register && (
@@ -1176,7 +1226,7 @@ function AdminDashboard() {
         <Stat
           label="Companies"
           value={data?.companies || 0}
-          trend="Training providers"
+          trend={data?.pendingCompanies ? `${data.pendingCompanies} pending approval` : 'Training providers'}
           icon={Building2}
         />
         <Stat label="Courses" value={data?.courses || 0} trend="Across catalog" icon={BookOpen} />
@@ -1193,13 +1243,45 @@ function AdminDashboard() {
           <h3>Recent audit activity</h3>
           <span className="status-badge">LIVE</span>
         </div>
-        {(data?.auditLogs || []).slice(0, 6).map(log => (
-          <div className="table-row" key={log.id}>
+        {(data?.auditLogs || []).slice(0, 8).map(log => (
+          <div
+            className="table-row"
+            key={log.id}
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'auto 1fr auto auto',
+              gap: '14px',
+              alignItems: 'center'
+            }}
+          >
             <span className="activity-icon tone-0">
               <CheckCircle2 size={15} />
             </span>
-            <strong>{log.action.replaceAll('_', ' ')}</strong>
-            <span className="muted">{new Date(log.timestamp).toLocaleString()}</span>
+            <div>
+              <strong>{log.action.replaceAll('_', ' ')}</strong>
+              <small className="muted" style={{ display: 'block', marginTop: '2px' }}>
+                User: <strong style={{ color: 'var(--ink)' }}>{log.userName || 'System'}</strong>
+              </small>
+            </div>
+            <div>
+              <span
+                style={{
+                  display: 'inline-block',
+                  padding: '3px 8px',
+                  borderRadius: '4px',
+                  background: 'var(--paper)',
+                  border: '1px solid var(--line)',
+                  fontSize: '11px',
+                  fontWeight: 600,
+                  color: 'var(--ink)'
+                }}
+              >
+                {log.userRole || 'SYSTEM'}
+              </span>
+            </div>
+            <span className="muted" style={{ fontSize: '12px' }}>
+              {new Date(log.timestamp).toLocaleString()}
+            </span>
           </div>
         ))}
       </div>

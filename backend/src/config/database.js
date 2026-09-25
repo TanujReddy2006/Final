@@ -27,7 +27,8 @@ export const db = {
   auditLogs: [],
   notifications: [],
   skills: [],
-  verifications: []
+  verifications: [],
+  pendingCompanyRegistrations: []
 };
 
 export function isDatabaseConnected() {
@@ -170,6 +171,16 @@ const DDL_STATEMENTS = `
     read BOOLEAN NOT NULL DEFAULT false,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
   );
+
+  CREATE TABLE IF NOT EXISTS pending_company_registrations (
+    id VARCHAR(100) PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    email VARCHAR(255) UNIQUE NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    company_name VARCHAR(255) NOT NULL,
+    status VARCHAR(50) NOT NULL DEFAULT 'PENDING',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
 `;
 
 const parseJson = val => {
@@ -295,16 +306,31 @@ const mapVerification = r => ({
   ip: r.ip
 });
 
-const mapAuditLog = r => ({
+const mapAuditLog = r => {
+  const meta = parseJson(r.metadata) || {};
+  return {
+    id: r.id,
+    actorId: r.actor_id,
+    action: r.action,
+    entityType: r.entity_type,
+    entityId: r.entity_id,
+    timestamp: r.timestamp,
+    status: r.status,
+    metadata: meta,
+    userName: meta.userName || 'System',
+    userRole: meta.userRole || 'SYSTEM',
+    ip: r.ip
+  };
+};
+
+const mapPendingCompany = r => ({
   id: r.id,
-  actorId: r.actor_id,
-  action: r.action,
-  entityType: r.entity_type,
-  entityId: r.entity_id,
-  timestamp: r.timestamp,
-  status: r.status,
-  metadata: parseJson(r.metadata) || {},
-  ip: r.ip
+  name: r.name,
+  email: r.email,
+  passwordHash: r.password_hash,
+  companyName: r.company_name,
+  status: r.status || 'PENDING',
+  createdAt: r.created_at
 });
 
 const mapNotification = r => ({
@@ -370,7 +396,7 @@ export async function initDatabase() {
     }
 
     // Load persisted rows from all PostgreSQL tables into synchronized db state
-    const [comps, usrs, crss, enrls, asmts, atmts, crts, vrfs, adts, ntfs] = await Promise.all([
+    const [comps, usrs, crss, enrls, asmts, atmts, crts, vrfs, adts, ntfs, pndg] = await Promise.all([
       pool.query('SELECT * FROM companies ORDER BY created_at ASC'),
       pool.query('SELECT * FROM users ORDER BY created_at ASC'),
       pool.query('SELECT * FROM courses ORDER BY created_at ASC'),
@@ -380,7 +406,8 @@ export async function initDatabase() {
       pool.query('SELECT * FROM certificates ORDER BY issued_date ASC'),
       pool.query('SELECT * FROM verifications ORDER BY requested_at ASC'),
       pool.query('SELECT * FROM audit_logs ORDER BY timestamp ASC'),
-      pool.query('SELECT * FROM notifications ORDER BY created_at ASC')
+      pool.query('SELECT * FROM notifications ORDER BY created_at ASC'),
+      pool.query('SELECT * FROM pending_company_registrations ORDER BY created_at ASC')
     ]);
 
     if (comps.rows.length) db.companies = comps.rows.map(mapCompany);
@@ -393,6 +420,7 @@ export async function initDatabase() {
     if (vrfs.rows.length) db.verifications = vrfs.rows.map(mapVerification);
     if (adts.rows.length) db.auditLogs = adts.rows.map(mapAuditLog);
     if (ntfs.rows.length) db.notifications = ntfs.rows.map(mapNotification);
+    if (pndg.rows.length) db.pendingCompanyRegistrations = pndg.rows.map(mapPendingCompany);
 
     enabled = true;
     console.log('PostgreSQL relational database initialized and synchronized');
@@ -591,6 +619,16 @@ export async function persistDatabase() {
          VALUES ($1, $2, $3, $4, $5, $6)
          ON CONFLICT (id) DO UPDATE SET read = EXCLUDED.read`,
         [n.id, n.userId, n.title, n.body, n.read ?? false, n.createdAt || new Date()]
+      );
+    }
+
+    for (const p of (db.pendingCompanyRegistrations || [])) {
+      await pool.query(
+        `INSERT INTO pending_company_registrations (id, name, email, password_hash, company_name, status, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT (id) DO UPDATE SET
+           status = EXCLUDED.status`,
+        [p.id, p.name, p.email, p.passwordHash, p.companyName, p.status || 'PENDING', p.createdAt || new Date()]
       );
     }
   } catch (error) {

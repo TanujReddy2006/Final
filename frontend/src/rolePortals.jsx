@@ -5,6 +5,7 @@ import {
   Award,
   BarChart3,
   BookOpen,
+  Building2,
   CheckCircle2,
   ChevronRight,
   Download,
@@ -910,13 +911,20 @@ export function HRHome() {
 
 export function AdminUsers() {
   const [users, setUsers] = useState([]);
+  const [pendingCompanies, setPendingCompanies] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [message, setMessage] = useState('');
 
   const load = () => {
-    unwrap(api.get('/admin/users'))
-      .then(setUsers)
+    Promise.all([
+      unwrap(api.get('/admin/users')),
+      unwrap(api.get('/admin/pending-companies')).catch(() => [])
+    ])
+      .then(([usersData, pendingData]) => {
+        setUsers(usersData || []);
+        setPendingCompanies(pendingData || []);
+      })
       .catch(console.error)
       .finally(() => setLoading(false));
   };
@@ -924,6 +932,29 @@ export function AdminUsers() {
   useEffect(() => {
     load();
   }, []);
+
+  const approveCompany = async (pendingId, companyName) => {
+    try {
+      await unwrap(api.post(`/admin/pending-companies/${pendingId}/approve`));
+      setMessage(`Company "${companyName}" approved successfully and added to the database.`);
+      load();
+    } catch (err) {
+      setMessage(err.response?.data?.message || 'Failed to approve company registration');
+    }
+  };
+
+  const rejectCompany = async (pendingId, companyName) => {
+    if (!window.confirm(`Reject registration request for "${companyName}"?`)) {
+      return;
+    }
+    try {
+      await unwrap(api.post(`/admin/pending-companies/${pendingId}/reject`));
+      setMessage(`Company registration for "${companyName}" rejected.`);
+      load();
+    } catch (err) {
+      setMessage(err.response?.data?.message || 'Failed to reject company registration');
+    }
+  };
 
   const toggleStatus = async (userId, currentActive) => {
     try {
@@ -958,7 +989,7 @@ export function AdminUsers() {
       <Title
         eyebrow="ADMIN PORTAL"
         title="People & Accounts"
-        sub="Manage registered users and control account access."
+        sub="Review pending company registrations, manage registered accounts, and control system access."
       />
 
       <div className="catalog-tools" style={{ marginBottom: '20px' }}>
@@ -978,6 +1009,101 @@ export function AdminUsers() {
         </div>
       )}
 
+      {/* Pending Company Approvals Section */}
+      <section className="panel table-panel" style={{ marginBottom: '28px' }}>
+        <div className="panel-heading">
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <Building2 size={18} />
+            <h3>Pending Company Approvals ({pendingCompanies.length})</h3>
+          </div>
+          <span className={pendingCompanies.length ? 'status-badge invalid' : 'status-badge'}>
+            {pendingCompanies.length ? `${pendingCompanies.length} AWAITING APPROVAL` : 'ALL CAUGHT UP'}
+          </span>
+        </div>
+
+        {pendingCompanies.length ? (
+          pendingCompanies.map(p => (
+            <div className="table-row" key={p.id}>
+              <div>
+                <strong>{p.companyName}</strong>
+                <small className="muted" style={{ display: 'block', marginTop: '2px' }}>
+                  Applicant: <strong>{p.name}</strong> · {p.email}
+                </small>
+              </div>
+
+              <div>
+                <span
+                  style={{
+                    display: 'inline-block',
+                    padding: '4px 10px',
+                    borderRadius: '5px',
+                    background: '#fef3c7',
+                    border: '1px solid #fde68a',
+                    fontWeight: 600,
+                    fontSize: '11px',
+                    letterSpacing: '0.4px',
+                    color: '#92400e'
+                  }}
+                >
+                  PENDING APPROVAL
+                </span>
+              </div>
+
+              <div>
+                <span className="muted" style={{ fontSize: '12px' }}>
+                  Submitted: {new Date(p.createdAt).toLocaleDateString()}
+                </span>
+              </div>
+
+              <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                <button
+                  type="button"
+                  className="button primary"
+                  style={{
+                    height: '32px',
+                    fontSize: '11px',
+                    padding: '0 12px',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '4px'
+                  }}
+                  onClick={() => approveCompany(p.id, p.companyName)}
+                  title="Approve company registration and add to database"
+                >
+                  <UserCheck size={13} /> Approve
+                </button>
+                <button
+                  type="button"
+                  className="button"
+                  style={{
+                    height: '32px',
+                    fontSize: '11px',
+                    padding: '0 12px',
+                    background: '#fff0ee',
+                    color: '#b64c39',
+                    border: '1px solid #ffd5cf',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '4px'
+                  }}
+                  onClick={() => rejectCompany(p.id, p.companyName)}
+                  title="Reject company registration"
+                >
+                  <X size={13} /> Reject
+                </button>
+              </div>
+            </div>
+          ))
+        ) : (
+          <div style={{ padding: '24px 20px', textAlign: 'center', color: 'var(--muted)' }}>
+            <p style={{ margin: 0, fontSize: '13px' }}>
+              No company registrations awaiting approval. New company registrations will appear here for administrator verification.
+            </p>
+          </div>
+        )}
+      </section>
+
+      {/* Registered Users Section */}
       <section className="panel table-panel">
         <div className="panel-heading">
           <h3>Registered Users ({filtered.length})</h3>
