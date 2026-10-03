@@ -130,12 +130,9 @@ function Auth({ onAuthenticate, initialRegister = false }) {
   const [serverError, setServerError] = useState('');
   const [pendingNotice, setPendingNotice] = useState('');
   const [pendingModal, setPendingModal] = useState(null);
-  const DEFAULT_GOOGLE_CLIENT_ID =
-    import.meta.env.VITE_GOOGLE_CLIENT_ID ||
-    '863063727206-gme7bjtkt48ubs76bsh7bc8h6mg66dan.apps.googleusercontent.com';
-
+  const [submitting, setSubmitting] = useState(false);
   const [googleClientId, setGoogleClientId] = useState(
-    () => DEFAULT_GOOGLE_CLIENT_ID
+    () => import.meta.env.VITE_GOOGLE_CLIENT_ID || ''
   );
   const [googleLoading, setGoogleLoading] = useState(false);
   const tokenClientRef = React.useRef(null);
@@ -297,7 +294,7 @@ function Auth({ onAuthenticate, initialRegister = false }) {
     setServerError('');
     setGoogleLoading(true);
 
-    let cid = googleClientId || DEFAULT_GOOGLE_CLIENT_ID;
+    let cid = googleClientId || import.meta.env.VITE_GOOGLE_CLIENT_ID || '';
     if (!cid) {
       try {
         const res = await api.get('/auth/google/url');
@@ -308,7 +305,7 @@ function Auth({ onAuthenticate, initialRegister = false }) {
 
     if (!cid) {
       setGoogleLoading(false);
-      setServerError('Google Client ID is not configured. Please check your environment configuration.');
+      setServerError('Google Client ID is not configured. Please ensure VITE_GOOGLE_CLIENT_ID is set in your .env file or start the backend.');
       return;
     }
 
