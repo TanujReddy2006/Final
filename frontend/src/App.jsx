@@ -131,57 +131,81 @@ function Auth({ onAuthenticate, initialRegister = false }) {
   const [pendingNotice, setPendingNotice] = useState('');
   const [pendingModal, setPendingModal] = useState(null);
   const [submitting, setSubmitting] = useState(false);
-  const [googleClientId, setGoogleClientId] = useState('');
+  const [googleClientId, setGoogleClientId] = useState(
+    () => import.meta.env.VITE_GOOGLE_CLIENT_ID || ''
+  );
   const [googleLoading, setGoogleLoading] = useState(false);
   const tokenClientRef = React.useRef(null);
+
+  const ensureGsiClient = () => {
+    return new Promise(resolve => {
+      if (window.google?.accounts?.oauth2) {
+        return resolve(window.google.accounts.oauth2);
+      }
+      let existingScript = document.getElementById('google-gsi-client');
+      if (!existingScript) {
+        existingScript = document.createElement('script');
+        existingScript.id = 'google-gsi-client';
+        existingScript.src = 'https://accounts.google.com/gsi/client';
+        existingScript.async = true;
+        existingScript.defer = true;
+        document.body.appendChild(existingScript);
+      }
+      let elapsed = 0;
+      const interval = setInterval(() => {
+        elapsed += 100;
+        if (window.google?.accounts?.oauth2) {
+          clearInterval(interval);
+          resolve(window.google.accounts.oauth2);
+        } else if (elapsed > 4000) {
+          clearInterval(interval);
+          resolve(null);
+        }
+      }, 100);
+    });
+  };
 
   // Load Google Client ID and initialize Google Identity Services
   useEffect(() => {
     let isMounted = true;
-    api.get('/auth/google/url').then(res => {
-      if (!isMounted) return;
-      const cid = res?.data?.data?.clientId || import.meta.env.VITE_GOOGLE_CLIENT_ID || '';
-      if (cid) {
-        setGoogleClientId(cid);
-        const setupGsi = () => {
-          if (window.google?.accounts?.oauth2) {
-            tokenClientRef.current = window.google.accounts.oauth2.initTokenClient({
-              client_id: cid,
-              scope: 'email profile openid',
-              callback: async tokenResponse => {
-                if (tokenResponse?.access_token) {
-                  await handleGoogleAccessToken(tokenResponse.access_token);
-                } else if (tokenResponse?.error) {
-                  setServerError('Google sign-in was cancelled or encountered an error.');
-                  setGoogleLoading(false);
-                }
-              }
-            });
-          }
-          if (window.google?.accounts?.id) {
-            window.google.accounts.id.initialize({
-              client_id: cid,
-              callback: handleGoogleCredentialResponse,
-              auto_select: false
-            });
-          }
-        };
+    const cid = googleClientId || import.meta.env.VITE_GOOGLE_CLIENT_ID || '';
+    if (cid && !googleClientId) {
+      setGoogleClientId(cid);
+    }
 
-        if (!document.getElementById('google-gsi-client')) {
-          const script = document.createElement('script');
-          script.id = 'google-gsi-client';
-          script.src = 'https://accounts.google.com/gsi/client';
-          script.async = true;
-          script.defer = true;
-          script.onload = setupGsi;
-          document.body.appendChild(script);
-        } else {
-          setupGsi();
+    api
+      .get('/auth/google/url')
+      .then(res => {
+        if (!isMounted) return;
+        const remoteCid = res?.data?.data?.clientId;
+        if (remoteCid && remoteCid !== googleClientId) {
+          setGoogleClientId(remoteCid);
         }
+      })
+      .catch(() => {});
+
+    ensureGsiClient().then(oauth2 => {
+      if (!isMounted || !oauth2) return;
+      const activeCid = cid || googleClientId;
+      if (activeCid) {
+        tokenClientRef.current = oauth2.initTokenClient({
+          client_id: activeCid,
+          scope: 'email profile openid',
+          callback: async tokenResponse => {
+            if (tokenResponse?.access_token) {
+              await handleGoogleAccessToken(tokenResponse.access_token);
+            } else if (tokenResponse?.error) {
+              setGoogleLoading(false);
+            }
+          }
+        });
       }
-    }).catch(() => {});
-    return () => { isMounted = false; };
-  }, [register, form.role, form.companyName]);
+    });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [register, form.role, form.companyName, googleClientId]);
 
   const handleGoogleAccessToken = async accessToken => {
     setGoogleLoading(true);
@@ -266,31 +290,55 @@ function Auth({ onAuthenticate, initialRegister = false }) {
     }
   };
 
-  const handleGoogleClick = () => {
+  const handleGoogleClick = async () => {
     setServerError('');
-    if (tokenClientRef.current) {
-      setGoogleLoading(true);
-      tokenClientRef.current.requestAccessToken({ prompt: 'select_account' });
-    } else if (window.google?.accounts?.oauth2 && googleClientId) {
-      setGoogleLoading(true);
-      const client = window.google.accounts.oauth2.initTokenClient({
-        client_id: googleClientId,
+    setGoogleLoading(true);
+
+    let cid = googleClientId;
+    if (!cid) {
+      cid = import.meta.env.VITE_GOOGLE_CLIENT_ID || '';
+      if (!cid) {
+        try {
+          const res = await api.get('/auth/google/url');
+          cid = res?.data?.data?.clientId || '';
+        } catch {}
+      }
+      if (cid) setGoogleClientId(cid);
+    }
+
+    if (!cid) {
+      setGoogleLoading(false);
+      setServerError('Google Client ID is not configured. Please check your environment configuration.');
+      return;
+    }
+
+    const oauth2 = await ensureGsiClient();
+    if (!oauth2) {
+      setGoogleLoading(false);
+      setServerError('Connecting to Google failed. Please check your internet connection or disable ad blockers and try again.');
+      return;
+    }
+
+    try {
+      const client = oauth2.initTokenClient({
+        client_id: cid,
         scope: 'email profile openid',
         callback: async tokenResponse => {
           if (tokenResponse?.access_token) {
             await handleGoogleAccessToken(tokenResponse.access_token);
           } else {
             setGoogleLoading(false);
+            if (tokenResponse?.error && tokenResponse.error !== 'popup_closed_by_user') {
+              setServerError(`Google sign-in error: ${tokenResponse.error}`);
+            }
           }
         }
       });
       tokenClientRef.current = client;
       client.requestAccessToken({ prompt: 'select_account' });
-    } else if (window.google?.accounts?.id) {
-      setGoogleLoading(true);
-      window.google.accounts.id.prompt();
-    } else {
-      setServerError('Connecting to Google. Please check your network connection and try again.');
+    } catch (err) {
+      setGoogleLoading(false);
+      setServerError(err.message || 'Failed to initiate Google sign-in.');
     }
   };
 
