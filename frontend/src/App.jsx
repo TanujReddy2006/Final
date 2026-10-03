@@ -130,9 +130,12 @@ function Auth({ onAuthenticate, initialRegister = false }) {
   const [serverError, setServerError] = useState('');
   const [pendingNotice, setPendingNotice] = useState('');
   const [pendingModal, setPendingModal] = useState(null);
-  const [submitting, setSubmitting] = useState(false);
+  const DEFAULT_GOOGLE_CLIENT_ID =
+    import.meta.env.VITE_GOOGLE_CLIENT_ID ||
+    '863063727206-gme7bjtkt48ubs76bsh7bc8h6mg66dan.apps.googleusercontent.com';
+
   const [googleClientId, setGoogleClientId] = useState(
-    () => import.meta.env.VITE_GOOGLE_CLIENT_ID || ''
+    () => DEFAULT_GOOGLE_CLIENT_ID
   );
   const [googleLoading, setGoogleLoading] = useState(false);
   const tokenClientRef = React.useRef(null);
@@ -294,15 +297,12 @@ function Auth({ onAuthenticate, initialRegister = false }) {
     setServerError('');
     setGoogleLoading(true);
 
-    let cid = googleClientId;
+    let cid = googleClientId || DEFAULT_GOOGLE_CLIENT_ID;
     if (!cid) {
-      cid = import.meta.env.VITE_GOOGLE_CLIENT_ID || '';
-      if (!cid) {
-        try {
-          const res = await api.get('/auth/google/url');
-          cid = res?.data?.data?.clientId || '';
-        } catch {}
-      }
+      try {
+        const res = await api.get('/auth/google/url');
+        cid = res?.data?.data?.clientId || '';
+      } catch {}
       if (cid) setGoogleClientId(cid);
     }
 
