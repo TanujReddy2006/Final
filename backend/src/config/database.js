@@ -46,6 +46,372 @@ export async function ensureDatabase() {
   }
 }
 
+function getDbKey(table) {
+  const map = {
+    users: 'users',
+    companies: 'companies',
+    courses: 'courses',
+    enrollments: 'enrollments',
+    assessments: 'assessments',
+    attempts: 'attempts',
+    certificates: 'certificates',
+    verifications: 'verifications',
+    audit_logs: 'auditLogs',
+    notifications: 'notifications',
+    pending_company_registrations: 'pendingCompanyRegistrations'
+  };
+  return map[table.toLowerCase()] || null;
+}
+
+function itemToRow(table, item) {
+  if (!item) return item;
+  const t = table.toLowerCase();
+  if (t === 'users') {
+    return {
+      id: item.id,
+      name: item.name,
+      email: item.email,
+      password_hash: item.password_hash || item.passwordHash,
+      role: item.role,
+      company_id: item.company_id || item.companyId || null,
+      active: item.active ?? true,
+      created_at: item.created_at || item.createdAt || now()
+    };
+  }
+  if (t === 'pending_company_registrations') {
+    return {
+      id: item.id,
+      name: item.name,
+      email: item.email,
+      password_hash: item.password_hash || item.passwordHash,
+      company_name: item.company_name || item.companyName || '',
+      role: item.role || 'COMPANY',
+      status: item.status || 'PENDING',
+      created_at: item.created_at || item.createdAt || now()
+    };
+  }
+  if (t === 'companies') {
+    return {
+      id: item.id,
+      name: item.name,
+      description: item.description || '',
+      website: item.website || '',
+      created_at: item.created_at || item.createdAt || now()
+    };
+  }
+  if (t === 'courses') {
+    return {
+      id: item.id,
+      title: item.title,
+      description: item.description,
+      detailed_description: item.detailed_description || item.detailedDescription || '',
+      thumbnail: item.thumbnail || '',
+      category: item.category || '',
+      difficulty: item.difficulty || 'BEGINNER',
+      duration: item.duration || '',
+      instructor_name: item.instructor_name || item.instructorName || '',
+      instructor_bio: item.instructor_bio || item.instructorBio || '',
+      prerequisites: item.prerequisites || '',
+      learning_objectives: item.learning_objectives || item.learningObjectives || [],
+      target_audience: item.target_audience || item.targetAudience || '',
+      status: item.status || 'DRAFT',
+      company_id: item.company_id || item.companyId,
+      modules: item.modules || [],
+      skills: item.skills || [],
+      assessment_id: item.assessment_id || item.assessmentId || null,
+      video_url: item.video_url || item.videoUrl || '',
+      created_at: item.created_at || item.createdAt || now(),
+      updated_at: item.updated_at || item.updatedAt || now()
+    };
+  }
+  if (t === 'enrollments') {
+    return {
+      id: item.id,
+      user_id: item.user_id || item.userId,
+      course_id: item.course_id || item.courseId,
+      progress: item.progress || 0,
+      status: item.status || 'IN_PROGRESS',
+      completed_modules: item.completed_modules || item.completedModules || [],
+      completed_lessons: item.completed_lessons || item.completedLessons || [],
+      started_at: item.started_at || item.startedAt || now(),
+      completed_at: item.completed_at || item.completedAt || null
+    };
+  }
+  if (t === 'assessments') {
+    return {
+      id: item.id,
+      course_id: item.course_id || item.courseId,
+      title: item.title,
+      passing_score: item.passing_score ?? item.passingScore ?? 70,
+      max_attempts: item.max_attempts ?? item.maxAttempts ?? 3,
+      questions: item.questions || [],
+      created_at: item.created_at || item.createdAt || now()
+    };
+  }
+  if (t === 'attempts') {
+    return {
+      id: item.id,
+      user_id: item.user_id || item.userId,
+      assessment_id: item.assessment_id || item.assessmentId,
+      score: item.score || 0,
+      passed: item.passed ?? false,
+      answers: item.answers || {},
+      attempt_number: item.attempt_number || item.attemptNumber || 1,
+      submitted_at: item.submitted_at || item.submittedAt || now()
+    };
+  }
+  if (t === 'certificates') {
+    return {
+      id: item.id,
+      certificate_id: item.certificate_id || item.certificateId,
+      certificate_number: item.certificate_number || item.certificateNumber,
+      learner_id: item.learner_id || item.learnerId,
+      learner_name: item.learner_name || item.learnerName,
+      course_id: item.course_id || item.courseId,
+      course_name: item.course_name || item.courseName,
+      certification: item.certification,
+      issued_by: item.issued_by || item.issuedBy,
+      score: item.score || 0,
+      completion_date: item.completion_date || item.completionDate || now(),
+      issued_date: item.issued_date || item.issuedDate || now(),
+      expiry_date: item.expiry_date || item.expiryDate || null,
+      verification_url: item.verification_url || item.verificationUrl,
+      pdf_url: item.pdf_url || item.pdfUrl,
+      status: item.status || 'VALID',
+      skills: item.skills || [],
+      revocation: item.revocation || null
+    };
+  }
+  if (t === 'audit_logs') {
+    return {
+      id: item.id,
+      actor_id: item.actor_id || item.actorId || null,
+      action: item.action,
+      entity_type: item.entity_type || item.entityType,
+      entity_id: item.entity_id || item.entityId,
+      timestamp: item.timestamp || now(),
+      status: item.status || 'SUCCESS',
+      metadata: item.metadata || {},
+      ip: item.ip || '127.0.0.1'
+    };
+  }
+  if (t === 'notifications') {
+    return {
+      id: item.id,
+      user_id: item.user_id || item.userId,
+      title: item.title,
+      body: item.body,
+      read: item.read ?? false,
+      created_at: item.created_at || item.createdAt || now()
+    };
+  }
+  if (t === 'verifications') {
+    return {
+      id: item.id,
+      certificate_id: item.certificate_id || item.certificateId,
+      searched_query: item.searched_query || item.searchedQuery || null,
+      requested_at: item.requested_at || item.requestedAt || now(),
+      ip: item.ip || null
+    };
+  }
+  return item;
+}
+
+export function executeInMemoryQuery(text, params = []) {
+  const sql = text.trim();
+  const lower = sql.toLowerCase();
+
+  // 1. DELETE
+  if (lower.startsWith('delete from')) {
+    const tableMatch = lower.match(/^delete\s+from\s+([a-z0-9_]+)/i);
+    if (!tableMatch) return { rows: [], rowCount: 0 };
+    const table = tableMatch[1];
+    const key = getDbKey(table);
+    if (!key) return { rows: [], rowCount: 0 };
+
+    if (!lower.includes('where')) {
+      const count = (db[key] || []).length;
+      db[key] = [];
+      return { rows: [], rowCount: count };
+    }
+
+    if (lower.includes("where id not in ('u-learner', 'u-company', 'u-hr', 'u-admin')")) {
+      db[key] = (db[key] || []).filter(u => ['u-learner', 'u-company', 'u-hr', 'u-admin'].includes(u.id));
+      return { rows: [], rowCount: 1 };
+    }
+    if (lower.includes("where id != 'co-techcorp'")) {
+      db[key] = (db[key] || []).filter(c => c.id === 'co-techcorp');
+      return { rows: [], rowCount: 1 };
+    }
+    if (lower.includes('where id = $1')) {
+      const initial = (db[key] || []).length;
+      db[key] = (db[key] || []).filter(item => item.id !== params[0]);
+      return { rows: [], rowCount: initial - db[key].length };
+    }
+    return { rows: [], rowCount: 0 };
+  }
+
+  // 2. INSERT
+  if (lower.startsWith('insert into')) {
+    const tableMatch = sql.match(/insert\s+into\s+([a-z0-9_]+)\s*\(([^)]+)\)/i);
+    if (!tableMatch) return { rows: [], rowCount: 0 };
+    const table = tableMatch[1];
+    const cols = tableMatch[2].split(',').map(c => c.trim().toLowerCase());
+    const key = getDbKey(table);
+    if (!key) return { rows: [], rowCount: 0 };
+
+    const row = {};
+    cols.forEach((col, idx) => {
+      let val = params[idx];
+      if (typeof val === 'string' && (val.startsWith('{') || val.startsWith('['))) {
+        try { val = JSON.parse(val); } catch {}
+      }
+      row[col] = val;
+    });
+
+    db[key] = db[key] || [];
+    db[key].push(row);
+    return { rows: [itemToRow(table, row)], rowCount: 1 };
+  }
+
+  // 3. UPDATE
+  if (lower.startsWith('update')) {
+    const tableMatch = sql.match(/update\s+([a-z0-9_]+)\s+set/i);
+    if (!tableMatch) return { rows: [], rowCount: 0 };
+    const table = tableMatch[1];
+    const key = getDbKey(table);
+    if (!key) return { rows: [], rowCount: 0 };
+
+    if (lower.includes("name = 'maya chen'") && lower.includes("id = 'u-learner'")) {
+      const u = (db.users || []).find(x => x.id === 'u-learner');
+      if (u) u.name = 'Maya Chen';
+      return { rows: [], rowCount: 1 };
+    }
+
+    if (lower.includes('where id =')) {
+      const idParam = params[params.length - 1];
+      const item = (db[key] || []).find(x => x.id === idParam);
+      if (item) {
+        if (lower.includes('active = $1')) {
+          item.active = params[0];
+        } else if (lower.includes('name = $1') && lower.includes('email = $2')) {
+          item.name = params[0];
+          item.email = params[1];
+          if (params.length >= 4) item.role = params[2];
+        } else if (lower.includes('name = $1')) {
+          item.name = params[0];
+        } else if (lower.includes('status = $1')) {
+          item.status = params[0];
+        } else if (table.toLowerCase() === 'courses') {
+          if (params.length > 5) {
+            item.title = params[0];
+            item.description = params[1];
+            item.detailed_description = params[2];
+            item.detailedDescription = params[2];
+          }
+        }
+      }
+      return { rows: item ? [itemToRow(table, item)] : [], rowCount: item ? 1 : 0 };
+    }
+
+    if (lower.includes('where user_id = $1') && lower.includes('where course_id = $2')) {
+      const e = (db.enrollments || []).find(x => (x.user_id || x.userId) === params[params.length - 2] && (x.course_id || x.courseId) === params[params.length - 1]);
+      if (e) {
+        if (params[0] !== undefined) e.progress = params[0];
+        if (params[1] !== undefined) e.status = params[1];
+      }
+      return { rows: e ? [itemToRow(table, e)] : [], rowCount: e ? 1 : 0 };
+    }
+
+    if (lower.includes('where user_id = $1')) {
+      const uid = params[0];
+      (db[key] || []).filter(x => (x.user_id || x.userId) === uid).forEach(x => {
+        if (lower.includes('read = true')) x.read = true;
+      });
+      return { rows: [], rowCount: 1 };
+    }
+
+    return { rows: [], rowCount: 0 };
+  }
+
+  // 4. SELECT
+  if (lower.startsWith('select')) {
+    const tableMatch = sql.match(/from\s+([a-z0-9_]+)/i);
+    if (!tableMatch) return { rows: [], rowCount: 0 };
+    const table = tableMatch[1];
+    const key = getDbKey(table);
+    if (!key) return { rows: [], rowCount: 0 };
+
+    let items = (db[key] || []).map(item => itemToRow(table, item));
+
+    if (lower.includes('count(*)')) {
+      return { rows: [{ count: String(items.length) }], rowCount: 1 };
+    }
+
+    if (lower.includes('lower(email) = lower($1)')) {
+      const email = String(params[0] || '').toLowerCase();
+      items = items.filter(x => String(x.email || '').toLowerCase() === email);
+      if (lower.includes("status = 'pending'")) {
+        items = items.filter(x => x.status === 'PENDING');
+      }
+      return { rows: items, rowCount: items.length };
+    }
+
+    if (lower.includes('where id = $1')) {
+      items = items.filter(x => x.id === params[0]);
+      return { rows: items, rowCount: items.length };
+    }
+
+    if (lower.includes('course_id = $1') && lower.includes('user_id = $2')) {
+      items = items.filter(x => x.course_id === params[0] && x.user_id === params[1]);
+      return { rows: items, rowCount: items.length };
+    }
+
+    if (lower.includes('user_id = $1') && lower.includes('course_id = $2')) {
+      items = items.filter(x => x.user_id === params[0] && x.course_id === params[1]);
+      return { rows: items, rowCount: items.length };
+    }
+
+    if (lower.includes('where course_id = $1')) {
+      items = items.filter(x => x.course_id === params[0]);
+      return { rows: items, rowCount: items.length };
+    }
+
+    if (lower.includes('where company_id = $1')) {
+      items = items.filter(x => x.company_id === params[0]);
+      return { rows: items, rowCount: items.length };
+    }
+
+    if (lower.includes('where learner_id = $1')) {
+      items = items.filter(x => x.learner_id === params[0]);
+      return { rows: items, rowCount: items.length };
+    }
+    if (lower.includes('where user_id = $1')) {
+      items = items.filter(x => x.user_id === params[0]);
+      return { rows: items, rowCount: items.length };
+    }
+
+    if (lower.includes('where certificate_id = $1')) {
+      items = items.filter(x => x.certificate_id === params[0] || x.id === params[0]);
+      return { rows: items, rowCount: items.length };
+    }
+
+    if (lower.includes("status = 'published'")) {
+      items = items.filter(x => x.status === 'PUBLISHED');
+      return { rows: items, rowCount: items.length };
+    }
+
+    if (lower.includes("status = 'pending'")) {
+      items = items.filter(x => x.status === 'PENDING');
+      return { rows: items, rowCount: items.length };
+    }
+
+    return { rows: items, rowCount: items.length };
+  }
+
+  return { rows: [], rowCount: 0 };
+}
+
 export async function query(text, params) {
   if (!pool) {
     await ensureDatabase();
@@ -53,7 +419,7 @@ export async function query(text, params) {
   if (pool && enabled) {
     return pool.query(text, params);
   }
-  return { rows: [] };
+  return executeInMemoryQuery(text, params);
 }
 
 const DDL_STATEMENTS = `

@@ -921,6 +921,81 @@ test('company registration requires admin approval before details enter database
   assert.equal(hrLoginSuccess.body.data.user.role, 'HR');
 });
 
+test('google oauth endpoints support sign-in, learner registration, company approval workflow, and admin protection', async () => {
+  // 1. Check Google Auth URL endpoint
+  const urlRes = await request(app).get('/api/v1/auth/google/url');
+  assert.equal(urlRes.status, 200);
+  assert.equal(urlRes.body.success, true);
+  assert.ok('configured' in urlRes.body.data);
+
+  // 2. Existing user sign-in via Google OAuth
+  const existingLoginRes = await request(app).post('/api/v1/auth/google').send({
+    isTest: true,
+    testEmail: 'learner@example.com',
+    testName: 'Maya Chen'
+  });
+  assert.equal(existingLoginRes.status, 200);
+  assert.equal(existingLoginRes.body.success, true);
+  assert.ok(existingLoginRes.body.data.token, 'Must return JWT token');
+  assert.equal(existingLoginRes.body.data.user.email, 'learner@example.com');
+  assert.equal(existingLoginRes.body.data.user.role, 'LEARNER');
+
+  // 3. New user registration as LEARNER via Google OAuth (instant provisioning)
+  const newLearnerEmail = `google_learner_${Date.now()}@example.com`;
+  const registerLearnerRes = await request(app).post('/api/v1/auth/google').send({
+    isTest: true,
+    testEmail: newLearnerEmail,
+    testName: 'Sam Google Learner',
+    role: 'LEARNER'
+  });
+  assert.equal(registerLearnerRes.status, 200);
+  assert.equal(registerLearnerRes.body.success, true);
+  assert.ok(registerLearnerRes.body.data.token);
+  assert.equal(registerLearnerRes.body.data.user.email, newLearnerEmail);
+  assert.equal(registerLearnerRes.body.data.user.role, 'LEARNER');
+
+  // 4. New user registration as COMPANY via Google OAuth (enforces admin approval workflow)
+  const newCompanyEmail = `google_company_${Date.now()}@example.com`;
+  const registerCompanyRes = await request(app).post('/api/v1/auth/google').send({
+    isTest: true,
+    testEmail: newCompanyEmail,
+    testName: 'Robin Google Partner',
+    role: 'COMPANY',
+    companyName: 'Google Cloud Training'
+  });
+  assert.equal(registerCompanyRes.status, 200);
+  assert.equal(registerCompanyRes.body.success, true);
+  assert.equal(registerCompanyRes.body.pendingApproval, true);
+  assert.ok(registerCompanyRes.body.message.includes('sent to the administrator for approval'));
+
+  // 5. Attempting to register as ADMIN via Google OAuth is forbidden
+  const adminAttemptRes = await request(app).post('/api/v1/auth/google').send({
+    isTest: true,
+    testEmail: `fake_admin_${Date.now()}@example.com`,
+    testName: 'Impostor Admin',
+    role: 'ADMIN'
+  });
+  assert.equal(adminAttemptRes.status, 403);
+  assert.equal(adminAttemptRes.body.success, false);
+  // 6. Attempting to sign in with an unregistered Google email rejects with 404 notRegistered
+  const unregRes = await request(app).post('/api/v1/auth/google').send({
+    isTest: true,
+    intent: 'SIGN_IN',
+    testEmail: `unregistered_${Date.now()}@example.com`,
+    testName: 'Unregistered User'
+  });
+  assert.equal(unregRes.status, 404);
+  assert.equal(unregRes.body.notRegistered, true);
+  assert.ok(unregRes.body.message.includes('create a new account'));
+
+  // 7. Attempting to authenticate with invalid Google credentials fails with 401
+  const invalidRes = await request(app).post('/api/v1/auth/google').send({
+    credential: 'invalid-token-123'
+  });
+  assert.equal(invalidRes.status, 401);
+  assert.equal(invalidRes.body.success, false);
+});
+
 test.after(async () => {
   await query('DELETE FROM certificates');
   await query('DELETE FROM attempts');

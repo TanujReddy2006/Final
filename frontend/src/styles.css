@@ -36,3 +36,13 @@
 @keyframes modalFadeIn{from{opacity:0}to{opacity:1}}
 @keyframes modalSlideUp{from{opacity:0;transform:translateY(12px) scale(0.98)}to{opacity:1;transform:translateY(0) scale(1)}}
 
+/* Google OAuth & Social Auth Styling */
+.auth-divider{display:flex;align-items:center;text-align:center;margin:20px 0 16px;color:var(--muted);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px}
+.auth-divider::before,.auth-divider::after{content:'';flex:1;border-bottom:1px solid var(--line)}
+.auth-divider span{padding:0 12px}
+.google-auth-btn{display:flex;align-items:center;justify-content:center;gap:12px;width:100%;height:44px;background:#ffffff;color:#3c4043;border:1px solid #dadce0;border-radius:7px;font-size:14px;font-weight:600;font-family:inherit;cursor:pointer;transition:background-color .2s,box-shadow .2s,border-color .2s;box-shadow:0 1px 2px rgba(60,64,67,.08)}
+.google-auth-btn:hover{background-color:#f8fafd;border-color:#c6c9ce;box-shadow:0 2px 6px rgba(60,64,67,.15);transform:translateY(-1px)}
+.google-auth-btn:disabled{opacity:.6;cursor:not-allowed;transform:none}
+.google-auth-btn svg{flex-shrink:0}
+
+

@@ -131,6 +131,168 @@ function Auth({ onAuthenticate, initialRegister = false }) {
   const [pendingNotice, setPendingNotice] = useState('');
   const [pendingModal, setPendingModal] = useState(null);
   const [submitting, setSubmitting] = useState(false);
+  const [googleClientId, setGoogleClientId] = useState('');
+  const [googleLoading, setGoogleLoading] = useState(false);
+  const tokenClientRef = React.useRef(null);
+
+  // Load Google Client ID and initialize Google Identity Services
+  useEffect(() => {
+    let isMounted = true;
+    api.get('/auth/google/url').then(res => {
+      if (!isMounted) return;
+      const cid = res?.data?.data?.clientId || import.meta.env.VITE_GOOGLE_CLIENT_ID || '';
+      if (cid) {
+        setGoogleClientId(cid);
+        const setupGsi = () => {
+          if (window.google?.accounts?.oauth2) {
+            tokenClientRef.current = window.google.accounts.oauth2.initTokenClient({
+              client_id: cid,
+              scope: 'email profile openid',
+              callback: async tokenResponse => {
+                if (tokenResponse?.access_token) {
+                  await handleGoogleAccessToken(tokenResponse.access_token);
+                } else if (tokenResponse?.error) {
+                  setServerError('Google sign-in was cancelled or encountered an error.');
+                  setGoogleLoading(false);
+                }
+              }
+            });
+          }
+          if (window.google?.accounts?.id) {
+            window.google.accounts.id.initialize({
+              client_id: cid,
+              callback: handleGoogleCredentialResponse,
+              auto_select: false
+            });
+          }
+        };
+
+        if (!document.getElementById('google-gsi-client')) {
+          const script = document.createElement('script');
+          script.id = 'google-gsi-client';
+          script.src = 'https://accounts.google.com/gsi/client';
+          script.async = true;
+          script.defer = true;
+          script.onload = setupGsi;
+          document.body.appendChild(script);
+        } else {
+          setupGsi();
+        }
+      }
+    }).catch(() => {});
+    return () => { isMounted = false; };
+  }, [register, form.role, form.companyName]);
+
+  const handleGoogleAccessToken = async accessToken => {
+    setGoogleLoading(true);
+    setServerError('');
+    try {
+      const res = await onAuthenticate('/auth/google', {
+        accessToken,
+        intent: register ? 'REGISTER' : 'SIGN_IN',
+        role: register ? form.role : undefined,
+        companyName: register && form.role === 'COMPANY' ? form.companyName : undefined
+      });
+      if (res?.pendingApproval) {
+        setPendingModal({
+          name: res.data?.name || 'Google User',
+          email: res.data?.email || '',
+          role: res.data?.role || form.role,
+          companyName: res.data?.companyName || form.companyName || '',
+          message: res.message
+        });
+        setPendingNotice(res.message);
+        setRegister(false);
+      }
+    } catch (err) {
+      if (err.response?.data?.notRegistered) {
+        switchMode(true);
+        const gUser = err.response.data.data;
+        if (gUser?.email) {
+          setForm(prev => ({
+            ...prev,
+            email: gUser.email,
+            name: gUser.name || prev.name
+          }));
+        }
+        setServerError('No account found with this Google email. Please choose your account type and click "Sign up with Google" to create your account.');
+      } else {
+        setServerError(err.response?.data?.message || 'Google authentication failed');
+      }
+    } finally {
+      setGoogleLoading(false);
+    }
+  };
+
+  const handleGoogleCredentialResponse = async response => {
+    if (!response?.credential) return;
+    setGoogleLoading(true);
+    setServerError('');
+    try {
+      const res = await onAuthenticate('/auth/google', {
+        credential: response.credential,
+        intent: register ? 'REGISTER' : 'SIGN_IN',
+        role: register ? form.role : undefined,
+        companyName: register && form.role === 'COMPANY' ? form.companyName : undefined
+      });
+      if (res?.pendingApproval) {
+        setPendingModal({
+          name: res.data?.name || 'Google User',
+          email: res.data?.email || '',
+          role: res.data?.role || form.role,
+          companyName: res.data?.companyName || form.companyName || '',
+          message: res.message
+        });
+        setPendingNotice(res.message);
+        setRegister(false);
+      }
+    } catch (err) {
+      if (err.response?.data?.notRegistered) {
+        switchMode(true);
+        const gUser = err.response.data.data;
+        if (gUser?.email) {
+          setForm(prev => ({
+            ...prev,
+            email: gUser.email,
+            name: gUser.name || prev.name
+          }));
+        }
+        setServerError('No account found with this Google email. Please choose your account type and click "Sign up with Google" to create your account.');
+      } else {
+        setServerError(err.response?.data?.message || 'Google authentication failed');
+      }
+    } finally {
+      setGoogleLoading(false);
+    }
+  };
+
+  const handleGoogleClick = () => {
+    setServerError('');
+    if (tokenClientRef.current) {
+      setGoogleLoading(true);
+      tokenClientRef.current.requestAccessToken({ prompt: 'select_account' });
+    } else if (window.google?.accounts?.oauth2 && googleClientId) {
+      setGoogleLoading(true);
+      const client = window.google.accounts.oauth2.initTokenClient({
+        client_id: googleClientId,
+        scope: 'email profile openid',
+        callback: async tokenResponse => {
+          if (tokenResponse?.access_token) {
+            await handleGoogleAccessToken(tokenResponse.access_token);
+          } else {
+            setGoogleLoading(false);
+          }
+        }
+      });
+      tokenClientRef.current = client;
+      client.requestAccessToken({ prompt: 'select_account' });
+    } else if (window.google?.accounts?.id) {
+      setGoogleLoading(true);
+      window.google.accounts.id.prompt();
+    } else {
+      setServerError('Connecting to Google. Please check your network connection and try again.');
+    }
+  };
 
   useEffect(() => {
     setRegister(initialRegister);
@@ -384,6 +546,7 @@ function Auth({ onAuthenticate, initialRegister = false }) {
           </div>
         </div>
       )}
+
       <section className="auth-art">
         <Link to="/" className="brand" style={{ textDecoration: 'none', color: 'inherit' }}>
           <span className="brand-mark">L</span> learnforge
@@ -518,6 +681,24 @@ function Auth({ onAuthenticate, initialRegister = false }) {
             </button>
           </form>
 
+          <div className="auth-divider">
+            <span>or continue with</span>
+          </div>
+
+          <button
+            type="button"
+            className="google-auth-btn"
+            onClick={handleGoogleClick}
+            disabled={submitting || googleLoading}
+          >
+            <GoogleIcon />
+            <span>
+              {googleLoading
+                ? 'Connecting to Google...'
+                : (register ? 'Sign up with Google' : 'Sign in with Google')}
+            </span>
+          </button>
+
           <div className="form-switch">
             {register ? 'Already have an account?' : 'New to learnforge?'}{' '}
             <button
@@ -562,6 +743,29 @@ function Field({ label, value, onChange, error, ...props }) {
       <input value={value} onChange={e => onChange(e.target.value)} {...props} />
       {error && <span className="field-error">{error}</span>}
     </label>
+  );
+}
+
+function GoogleIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" style={{ flexShrink: 0 }}>
+      <path
+        fill="#4285F4"
+        d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.66-5.17 3.66-9.17z"
+      />
+      <path
+        fill="#34A853"
+        d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.1-6.72-4.93H1.25v3.15C3.26 21.36 7.33 24 12 24z"
+      />
+      <path
+        fill="#FBBC05"
+        d="M5.28 14.27c-.25-.72-.38-1.49-.38-2.27s.13-1.55.38-2.27V6.58H1.25C.45 8.16 0 10.02 0 12s.45 3.84 1.25 5.42l4.03-3.15z"
+      />
+      <path
+        fill="#EA4335"
+        d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.33 0 3.26 2.64 1.25 6.58l4.03 3.15c.95-2.83 3.6-4.98 6.72-4.98z"
+      />
+    </svg>
   );
 }
 
