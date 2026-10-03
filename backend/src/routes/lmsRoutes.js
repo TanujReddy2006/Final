@@ -337,7 +337,7 @@ router.post('/sync/certificate', async (req, res) => {
 
     db.certificates = db.certificates || [];
     const existingIndex = db.certificates.findIndex(
-      c => c.certificateId.toLowerCase() === standardCert.certificateId.toLowerCase()
+      c => String(c.certificateId || c.certificate_id || '').toLowerCase() === standardCert.certificateId.toLowerCase()
     );
     if (existingIndex >= 0) {
       db.certificates[existingIndex] = { ...db.certificates[existingIndex], ...certRecord };

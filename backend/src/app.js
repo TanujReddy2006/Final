@@ -135,8 +135,8 @@ const audit = async (req, action, entityType, entityId, metadata = {}) => {
   }
 
   await query(
-    `INSERT INTO audit_logs (id, actor_id, action, entity_type, entity_id, timestamp, status, metadata, ip)
-     VALUES ($1, $2, $3, $4, $5, now(), $6, $7, $8)`,
+    `INSERT INTO audit_logs (id, actor_id, action, entity_type, entity_id, status, metadata, ip, timestamp)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())`,
     [
       logEntry.id,
       actorId,
@@ -1852,8 +1852,9 @@ app.post('/api/v1/assessments/:id/submit', requireAuth, allow('LEARNER'), async 
     ]
   );
 
-  db.attempts = db.attempts || [];
-  db.attempts.push(attempt);
+  const attIdx = (db.attempts || []).findIndex(a => a.id === attempt.id);
+  if (attIdx >= 0) db.attempts[attIdx] = attempt;
+  else (db.attempts = db.attempts || []).push(attempt);
 
   const allUserAttempts = [...priorAttempts, attempt];
   const highestScore = Math.max(...allUserAttempts.map(a => a.score));

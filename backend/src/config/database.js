@@ -266,10 +266,33 @@ export function executeInMemoryQuery(text, params = []) {
       if (typeof val === 'string' && (val.startsWith('{') || val.startsWith('['))) {
         try { val = JSON.parse(val); } catch {}
       }
-      row[col] = val;
+      if (val !== undefined) {
+        row[col] = val;
+      }
     });
+    if (!row.timestamp) row.timestamp = now();
+    if (!row.created_at) row.created_at = now();
 
     db[key] = db[key] || [];
+    if (table.toLowerCase() === 'certificates') {
+      row.certificateId = row.certificateId || row.certificate_id;
+      row.certificateNumber = row.certificateNumber || row.certificate_number;
+      row.learnerId = row.learnerId || row.learner_id;
+      row.learnerName = row.learnerName || row.learner_name;
+      row.courseId = row.courseId || row.course_id;
+      row.courseName = row.courseName || row.course_name;
+      const cId = row.certificate_id || row.certificateId;
+      const existingIdx = (db.certificates || []).findIndex(x => (x.certificate_id || x.certificateId) === cId);
+      if (existingIdx >= 0) {
+        db.certificates[existingIdx] = { ...db.certificates[existingIdx], ...row };
+        return { rows: [itemToRow(table, db.certificates[existingIdx])], rowCount: 1 };
+      }
+    }
+    const existingIdx = row.id ? (db[key] || []).findIndex(x => x.id === row.id) : -1;
+    if (existingIdx >= 0) {
+      db[key][existingIdx] = { ...db[key][existingIdx], ...row };
+      return { rows: [itemToRow(table, db[key][existingIdx])], rowCount: 1 };
+    }
     db[key].push(row);
     return { rows: [itemToRow(table, row)], rowCount: 1 };
   }
@@ -357,8 +380,46 @@ export function executeInMemoryQuery(text, params = []) {
       return { rows: items, rowCount: items.length };
     }
 
+    if (lower.includes('where id = $1 or lower(email) = lower($2)')) {
+      const email = String(params[1] || '').toLowerCase();
+      items = items.filter(x => x.id === params[0] || String(x.email || '').toLowerCase() === email);
+      return { rows: items, rowCount: items.length };
+    }
+
     if (lower.includes('where id = $1')) {
       items = items.filter(x => x.id === params[0]);
+      return { rows: items, rowCount: items.length };
+    }
+
+    if (lower.includes('course_id = $1') && lower.includes('learner_id = $2')) {
+      items = items.filter(x => (x.course_id || x.courseId) === params[0] && (x.learner_id || x.learnerId) === params[1]);
+      return { rows: items, rowCount: items.length };
+    }
+
+    if (lower.includes('assessment_id = $1') && lower.includes('id = $2')) {
+      items = items.filter(x => (x.assessment_id || x.assessmentId) === params[0] || x.id === params[1]);
+      return { rows: items, rowCount: items.length };
+    }
+
+    if (lower.includes('assessment_id = $1') && lower.includes('user_id = $2')) {
+      items = items.filter(x => (x.assessment_id === params[0] || x.assessmentId === params[0]) && (x.user_id === params[1] || x.userId === params[1]));
+      if (lower.includes('order by submitted_at desc')) {
+        items.sort((a, b) => new Date(b.submitted_at || b.submittedAt) - new Date(a.submitted_at || a.submittedAt));
+      }
+      if (lower.includes('order by score desc')) {
+        items.sort((a, b) => (b.score || 0) - (a.score || 0));
+      }
+      return { rows: items, rowCount: items.length };
+    }
+
+    if (lower.includes('user_id = $1') && lower.includes('assessment_id = $2')) {
+      items = items.filter(x => (x.user_id === params[0] || x.userId === params[0]) && (x.assessment_id === params[1] || x.assessmentId === params[1]));
+      if (lower.includes('order by submitted_at desc')) {
+        items.sort((a, b) => new Date(b.submitted_at || b.submittedAt) - new Date(a.submitted_at || a.submittedAt));
+      }
+      if (lower.includes('order by score desc')) {
+        items.sort((a, b) => (b.score || 0) - (a.score || 0));
+      }
       return { rows: items, rowCount: items.length };
     }
 
@@ -391,6 +452,16 @@ export function executeInMemoryQuery(text, params = []) {
       return { rows: items, rowCount: items.length };
     }
 
+    if (lower.includes('certificate_id') && lower.includes('certificate_number')) {
+      const q = String(params[0] || '').toLowerCase();
+      items = items.filter(x =>
+        String(x.certificate_id || x.certificateId || '').toLowerCase() === q ||
+        String(x.certificate_number || x.certificateNumber || '').toLowerCase() === q ||
+        String(x.id || '').toLowerCase() === q
+      );
+      return { rows: items, rowCount: items.length };
+    }
+
     if (lower.includes('where certificate_id = $1')) {
       items = items.filter(x => x.certificate_id === params[0] || x.id === params[0]);
       return { rows: items, rowCount: items.length };
@@ -404,6 +475,14 @@ export function executeInMemoryQuery(text, params = []) {
     if (lower.includes("status = 'pending'")) {
       items = items.filter(x => x.status === 'PENDING');
       return { rows: items, rowCount: items.length };
+    }
+
+    if (lower.includes('order by timestamp desc')) {
+      items.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    }
+    const limitMatch = lower.match(/limit\s+(\d+)/);
+    if (limitMatch) {
+      items = items.slice(0, parseInt(limitMatch[1], 10));
     }
 
     return { rows: items, rowCount: items.length };
@@ -691,16 +770,16 @@ const mapAuditLog = r => {
   const meta = parseJson(r.metadata) || {};
   return {
     id: r.id,
-    actorId: r.actor_id,
+    actorId: r.actor_id || r.actorId,
     action: r.action,
-    entityType: r.entity_type,
-    entityId: r.entity_id,
-    timestamp: r.timestamp,
-    status: r.status,
+    entityType: r.entity_type || r.entityType,
+    entityId: r.entity_id || r.entityId,
+    timestamp: r.timestamp || now(),
+    status: r.status || 'SUCCESS',
     metadata: meta,
-    userName: meta.userName || 'System',
-    userRole: meta.userRole || 'SYSTEM',
-    ip: r.ip
+    userName: meta.userName || r.user_name || r.userName || 'System',
+    userRole: meta.userRole || r.user_role || r.userRole || 'SYSTEM',
+    ip: r.ip || '127.0.0.1'
   };
 };
 
