@@ -24,6 +24,9 @@ export const db = {
   assessments: [],
   attempts: [],
   certificates: [],
+  externalCertificates: [],
+  moodleSyncState: [],
+  unmatchedExternalCertificates: [],
   auditLogs: [],
   notifications: [],
   skills: [],
@@ -55,6 +58,9 @@ function getDbKey(table) {
     assessments: 'assessments',
     attempts: 'attempts',
     certificates: 'certificates',
+    external_certificates: 'externalCertificates',
+    moodle_sync_state: 'moodleSyncState',
+    unmatched_external_certificates: 'unmatchedExternalCertificates',
     verifications: 'verifications',
     audit_logs: 'auditLogs',
     notifications: 'notifications',
@@ -214,6 +220,50 @@ function itemToRow(table, item) {
       ip: item.ip || null
     };
   }
+  if (t === 'external_certificates') {
+    return {
+      id: item.id,
+      user_id: item.user_id || item.userId,
+      provider: item.provider || 'MOODLE',
+      course_id: item.course_id || item.courseId,
+      course_name: item.course_name || item.courseName,
+      certificate_title: item.certificate_title || item.certificateTitle,
+      issuing_organization: item.issuing_organization || item.issuingOrganization,
+      credential_id: item.credential_id || item.credentialId,
+      verification_url: item.verification_url || item.verificationUrl,
+      issue_date: item.issue_date || item.issueDate || now(),
+      completion_date: item.completion_date || item.completionDate || now(),
+      verification_status: item.verification_status || item.verificationStatus || 'UNVERIFIED',
+      source_data: item.source_data || item.sourceData || {},
+      created_at: item.created_at || item.createdAt || now(),
+      updated_at: item.updated_at || item.updatedAt || now()
+    };
+  }
+  if (t === 'moodle_sync_state') {
+    return {
+      id: item.id || 'moodle_state',
+      last_sync_timestamp: item.last_sync_timestamp || item.lastSyncTimestamp,
+      last_status: item.last_status || item.lastStatus || 'IDLE',
+      synced_count: item.synced_count ?? item.syncedCount ?? 0,
+      last_error: item.last_error || item.lastError || null,
+      metadata: item.metadata || {}
+    };
+  }
+  if (t === 'unmatched_external_certificates') {
+    return {
+      id: item.id,
+      raw_email: item.raw_email || item.rawEmail,
+      normalized_email: item.normalized_email || item.normalizedEmail,
+      provider: item.provider || 'MOODLE',
+      course_name: item.course_name || item.courseName,
+      credential_id: item.credential_id || item.credentialId,
+      verification_url: item.verification_url || item.verificationUrl,
+      issue_date: item.issue_date || item.issueDate || now(),
+      status: item.status || 'PENDING_REVIEW',
+      payload: item.payload || {},
+      created_at: item.created_at || item.createdAt || now()
+    };
+  }
   return item;
 }
 
@@ -288,6 +338,38 @@ export function executeInMemoryQuery(text, params = []) {
         return { rows: [itemToRow(table, db.certificates[existingIdx])], rowCount: 1 };
       }
     }
+    if (table.toLowerCase() === 'external_certificates') {
+      const p = String(row.provider || '').toUpperCase();
+      const c = String(row.credential_id || '').toUpperCase();
+      const existingIdx = (db.externalCertificates || []).findIndex(x => 
+        String(x.provider || '').toUpperCase() === p && 
+        String(x.credential_id || '').toUpperCase() === c
+      );
+      if (existingIdx >= 0) {
+        db.externalCertificates[existingIdx] = { ...db.externalCertificates[existingIdx], ...row, updated_at: now() };
+        return { rows: [itemToRow(table, db.externalCertificates[existingIdx])], rowCount: 1 };
+      }
+    }
+    if (table.toLowerCase() === 'moodle_sync_state') {
+      const stateId = row.id || 'moodle_state';
+      const existingIdx = (db.moodleSyncState || []).findIndex(x => x.id === stateId);
+      if (existingIdx >= 0) {
+        db.moodleSyncState[existingIdx] = { ...db.moodleSyncState[existingIdx], ...row };
+        return { rows: [itemToRow(table, db.moodleSyncState[existingIdx])], rowCount: 1 };
+      }
+    }
+    if (table.toLowerCase() === 'unmatched_external_certificates') {
+      const p = String(row.provider || '').toUpperCase();
+      const c = String(row.credential_id || '').toUpperCase();
+      const existingIdx = (db.unmatchedExternalCertificates || []).findIndex(x => 
+        String(x.provider || '').toUpperCase() === p && 
+        String(x.credential_id || '').toUpperCase() === c
+      );
+      if (existingIdx >= 0) {
+        db.unmatchedExternalCertificates[existingIdx] = { ...db.unmatchedExternalCertificates[existingIdx], ...row };
+        return { rows: [itemToRow(table, db.unmatchedExternalCertificates[existingIdx])], rowCount: 1 };
+      }
+    }
     const existingIdx = row.id ? (db[key] || []).findIndex(x => x.id === row.id) : -1;
     if (existingIdx >= 0) {
       db[key][existingIdx] = { ...db[key][existingIdx], ...row };
@@ -323,6 +405,9 @@ export function executeInMemoryQuery(text, params = []) {
           if (params.length >= 4) item.role = params[2];
         } else if (lower.includes('name = $1')) {
           item.name = params[0];
+        } else if (lower.includes('verification_status = $1')) {
+          item.verification_status = params[0];
+          item.updated_at = now();
         } else if (lower.includes('status = $1')) {
           item.status = params[0];
         } else if (table.toLowerCase() === 'courses') {
@@ -450,6 +535,50 @@ export function executeInMemoryQuery(text, params = []) {
     if (lower.includes('where user_id = $1')) {
       items = items.filter(x => x.user_id === params[0]);
       return { rows: items, rowCount: items.length };
+    }
+
+    if (table.toLowerCase() === 'external_certificates') {
+      if (lower.includes('upper(provider) = upper($1) and credential_id = $2')) {
+        const prov = String(params[0] || '').toUpperCase();
+        const cred = String(params[1] || '').trim();
+        items = items.filter(x => String(x.provider || '').toUpperCase() === prov && String(x.credential_id || '').trim() === cred);
+        return { rows: items, rowCount: items.length };
+      }
+      if (lower.includes('where 1=1')) {
+        params.forEach(p => {
+          if (!p) return;
+          const str = String(p).toUpperCase();
+          if (str.startsWith('%') && str.endsWith('%')) {
+            const inner = str.replace(/%/g, '').toLowerCase();
+            items = items.filter(x => 
+              String(x.certificate_title || '').toLowerCase().includes(inner) ||
+              String(x.course_name || '').toLowerCase().includes(inner) ||
+              String(x.credential_id || '').toLowerCase().includes(inner)
+            );
+          } else {
+            items = items.filter(x => 
+              x.user_id === p || 
+              String(x.provider || '').toUpperCase() === str || 
+              String(x.verification_status || '').toUpperCase() === str
+            );
+          }
+        });
+        return { rows: items, rowCount: items.length };
+      }
+    }
+
+    if (table.toLowerCase() === 'moodle_sync_state') {
+      if (lower.includes('where id = $1')) {
+        items = items.filter(x => x.id === params[0]);
+        return { rows: items, rowCount: items.length };
+      }
+    }
+
+    if (table.toLowerCase() === 'unmatched_external_certificates') {
+      if (lower.includes('where status = $1')) {
+        items = items.filter(x => x.status === params[0]);
+        return { rows: items, rowCount: items.length };
+      }
     }
 
     if (lower.includes('certificate_id') && lower.includes('certificate_number')) {
@@ -641,6 +770,49 @@ const DDL_STATEMENTS = `
     status VARCHAR(50) NOT NULL DEFAULT 'PENDING',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
   );
+
+  CREATE TABLE IF NOT EXISTS external_certificates (
+    id VARCHAR(100) PRIMARY KEY,
+    user_id VARCHAR(100) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    provider VARCHAR(50) NOT NULL DEFAULT 'MOODLE',
+    course_id VARCHAR(100),
+    course_name VARCHAR(255) NOT NULL,
+    certificate_title VARCHAR(255) NOT NULL,
+    issuing_organization VARCHAR(255) NOT NULL,
+    credential_id VARCHAR(255),
+    verification_url VARCHAR(500),
+    issue_date TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completion_date TIMESTAMPTZ,
+    verification_status VARCHAR(50) NOT NULL DEFAULT 'UNVERIFIED',
+    source_data JSONB DEFAULT '{}',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(provider, credential_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS moodle_sync_state (
+    id VARCHAR(100) PRIMARY KEY DEFAULT 'moodle_state',
+    last_sync_timestamp TIMESTAMPTZ,
+    last_status VARCHAR(50) DEFAULT 'IDLE',
+    synced_count INT DEFAULT 0,
+    last_error TEXT,
+    metadata JSONB DEFAULT '{}'
+  );
+
+  CREATE TABLE IF NOT EXISTS unmatched_external_certificates (
+    id VARCHAR(100) PRIMARY KEY,
+    raw_email VARCHAR(255) NOT NULL,
+    normalized_email VARCHAR(255) NOT NULL,
+    provider VARCHAR(50) NOT NULL DEFAULT 'MOODLE',
+    course_name VARCHAR(255) NOT NULL,
+    credential_id VARCHAR(255),
+    verification_url VARCHAR(500),
+    issue_date TIMESTAMPTZ,
+    status VARCHAR(50) DEFAULT 'PENDING_REVIEW',
+    payload JSONB DEFAULT '{}',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(provider, credential_id)
+  );
 `;
 
 const parseJson = val => {
@@ -827,6 +999,7 @@ export async function initDatabase() {
     await pool.query(`
       ALTER TABLE courses ADD COLUMN IF NOT EXISTS video_url VARCHAR(500);
       ALTER TABLE courses ADD COLUMN IF NOT EXISTS detailed_description TEXT;
+      ALTER TABLE courses ADD COLUMN IF NOT EXISTS provider VARCHAR(50) DEFAULT 'INTERNAL';
       ALTER TABLE pending_company_registrations ADD COLUMN IF NOT EXISTS role VARCHAR(50) NOT NULL DEFAULT 'COMPANY';
       ALTER TABLE pending_company_registrations ALTER COLUMN company_name DROP NOT NULL;
     `).catch(() => {});

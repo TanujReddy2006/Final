@@ -27,6 +27,9 @@ import { issueCertificate, readCertificatePdf } from './services/certificateServ
 import { normalizeModule, validateCourseForPublish } from './services/courseValidationService.js';
 import { getCached, invalidateCached, setCached } from './config/cache.js';
 import lmsRoutes from './routes/lmsRoutes.js';
+import externalCertificateRoutes from './routes/externalCertificateRoutes.js';
+import onestRoutes from './routes/onestRoutes.js';
+import onestMoodleSyncRoutes from './routes/onestMoodleSyncRoutes.js';
 
 const app = express();
 
@@ -197,6 +200,18 @@ app.get(['/health', '/healthz', '/api/v1/health'], (_, res) =>
 
 // Standard LMS Adapter Routes (ONEST / Beckn compliant)
 app.use('/api/v1/lms', lmsRoutes);
+
+// External Certificates & Verification Routes
+app.use('/api/external-certificates', externalCertificateRoutes);
+app.use('/api/v1/external-certificates', externalCertificateRoutes);
+
+// ONEST Beckn Protocol Webhook & Actions
+app.use('/api/onest', onestRoutes);
+app.use('/api/v1/onest', onestRoutes);
+
+// Moodle Continuous Sync Status & Trigger
+app.use('/api/moodle-sync', onestMoodleSyncRoutes);
+app.use('/api/v1/moodle-sync', onestMoodleSyncRoutes);
 
 // Auth endpoints
 app.post('/api/v1/auth/register', async (req, res) => {
@@ -738,7 +753,7 @@ app.get('/api/v1/courses', async (req, res) => {
     `SELECT c.*, comp.name AS comp_name, comp.description AS comp_desc, comp.website AS comp_web
      FROM courses c
      LEFT JOIN companies comp ON c.company_id = comp.id
-     WHERE c.status = 'PUBLISHED'
+     WHERE c.status = 'PUBLISHED' AND (c.provider = 'INTERNAL' OR c.provider IS NULL)
      ORDER BY c.created_at DESC`
   );
 
@@ -2064,7 +2079,42 @@ const handleCertificateVerification = async (req, res) => {
     [normalizedQuery]
   );
 
-  const certificate = rows.length ? mapCertificate(rows[0]) : null;
+  let certificate = rows.length ? mapCertificate(rows[0]) : null;
+
+  if (!certificate) {
+    const extRes = await query(
+      `SELECT ec.*, u.name AS user_name, u.email AS user_email
+       FROM external_certificates ec
+       LEFT JOIN users u ON ec.user_id = u.id
+       WHERE LOWER(ec.credential_id) = LOWER($1)
+          OR LOWER(ec.id) = LOWER($1)`,
+      [normalizedQuery]
+    ).catch(() => ({ rows: [] }));
+
+    if (extRes.rows.length) {
+      const ext = extRes.rows[0];
+      const source = typeof ext.source_data === 'string' ? JSON.parse(ext.source_data || '{}') : (ext.source_data || {});
+      certificate = {
+        id: ext.id,
+        certificateId: ext.credential_id || ext.id,
+        certificateNumber: ext.credential_id || ext.id,
+        learnerName: ext.user_name || source.learnerName || 'Verified Learner',
+        courseName: ext.course_name,
+        certification: ext.certificate_title || ext.course_name,
+        issuedBy: ext.issuing_organization || `${ext.provider} LMS`,
+        score: source.score || 95,
+        completionDate: ext.completion_date || ext.issue_date,
+        issuedDate: ext.issue_date,
+        expiryDate: null,
+        pdfUrl: source.pdfUrl || ext.verification_url || '',
+        verificationUrl: ext.verification_url || '',
+        status: ext.verification_status === 'VERIFIED' ? 'VALID' : ext.verification_status,
+        skills: source.skills || ['Verified External Credential'],
+        isExternal: true,
+        provider: ext.provider
+      };
+    }
+  }
 
   await query(
     `INSERT INTO verifications (id, certificate_id, searched_query, requested_at, ip)

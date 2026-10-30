@@ -14,7 +14,7 @@ test.before(async () => {
   await query('DELETE FROM audit_logs');
   await query('DELETE FROM pending_company_registrations');
   await query("UPDATE users SET name = 'Maya Chen' WHERE id = 'u-learner'");
-  await query("DELETE FROM users WHERE id NOT IN ('u-learner', 'u-company', 'u-hr', 'u-admin')");
+  await query("DELETE FROM users WHERE id NOT IN ('u-learner', 'u-company', 'u-hr', 'u-admin') AND email NOT IN ('vakadatanujreddy2006@gmail.com', 'tanuj@gmail.com')");
   await query("DELETE FROM companies WHERE id != 'co-techcorp'");
   db.courses = [];
   db.certificates = [];
@@ -1006,7 +1006,7 @@ test.after(async () => {
   await query('DELETE FROM audit_logs');
   await query('DELETE FROM pending_company_registrations');
   await query("UPDATE users SET name = 'Maya Chen' WHERE id = 'u-learner'");
-  await query("DELETE FROM users WHERE id NOT IN ('u-learner', 'u-company', 'u-hr', 'u-admin')");
+  await query("DELETE FROM users WHERE id NOT IN ('u-learner', 'u-company', 'u-hr', 'u-admin') AND email NOT IN ('vakadatanujreddy2006@gmail.com', 'tanuj@gmail.com')");
   await query("DELETE FROM companies WHERE id != 'co-techcorp'");
 });
 

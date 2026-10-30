@@ -1,0 +1,50 @@
+services:
+  mariadb:
+    image: mariadb:11.4
+    container_name: learnforge-moodle-mariadb
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: moodle_root_secret_pass
+      MARIADB_DATABASE: moodle
+      MARIADB_USER: moodle
+      MARIADB_PASSWORD: moodle_secure_pass123
+    volumes:
+      - moodle_mariadb_data:/var/lib/mysql
+    networks:
+      - moodle-network
+
+  moodle:
+    image: elestio/moodle:latest
+    container_name: learnforge-moodle-web
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    environment:
+      MOODLE_DATABASE_TYPE: mariadb
+      MOODLE_DATABASE_HOST: mariadb
+      MOODLE_DATABASE_PORT_NUMBER: 3306
+      MOODLE_DATABASE_NAME: moodle
+      MOODLE_DATABASE_USER: moodle
+      MOODLE_DATABASE_PASSWORD: moodle_secure_pass123
+      MOODLE_USERNAME: admin
+      MOODLE_PASSWORD: Admin@LearnForge123!
+      MOODLE_EMAIL: admin@example.com
+      MOODLE_SITE_NAME: LearnForge Moodle LMS
+      MOODLE_HOST: http://localhost:8080
+    volumes:
+      - moodledata:/var/moodledata
+    depends_on:
+      - mariadb
+    networks:
+      - moodle-network
+
+volumes:
+  moodle_mariadb_data:
+    name: learnforge_moodle_mariadb_data
+  moodledata:
+    name: learnforge_moodledata
+
+networks:
+  moodle-network:
+    name: learnforge-moodle-network
+    driver: bridge

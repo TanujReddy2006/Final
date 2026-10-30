@@ -7,6 +7,7 @@
  */
 
 import { InfosysSpringboardAdapter } from './providers/InfosysSpringboardAdapter.js';
+import { MoodleLmsAdapter } from './providers/MoodleLmsAdapter.js';
 
 class LmsRegistry {
   constructor() {
@@ -21,6 +22,10 @@ class LmsRegistry {
     // Register Infosys Springboard adapter
     const infosysAdapter = new InfosysSpringboardAdapter();
     this.registerAdapter(infosysAdapter.getProviderId(), infosysAdapter);
+
+    // Register Moodle LMS adapter
+    const moodleAdapter = new MoodleLmsAdapter();
+    this.registerAdapter(moodleAdapter.getProviderId(), moodleAdapter);
   }
 
   /**

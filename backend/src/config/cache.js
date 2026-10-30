@@ -5,7 +5,10 @@ let client;
 export async function initCache() {
   if (!process.env.REDIS_URL) return;
   try {
-    client = createClient({ url: process.env.REDIS_URL });
+    client = createClient({
+      url: process.env.REDIS_URL,
+      socket: { connectTimeout: 1500, reconnectStrategy: false }
+    });
     client.on('error', () => {});
     await client.connect();
     console.log('Redis verification cache enabled');

@@ -48,3 +48,6 @@ export const publicUser = user => {
   return safe;
 };
 
+export const authenticateToken = requireAuth;
+export const requireRole = allow;
+

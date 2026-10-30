@@ -10,10 +10,13 @@ import {
   ChevronRight,
   Download,
   Edit3,
+  ExternalLink,
   FileCheck2,
+  Globe,
   Lock,
   Mail,
   Plus,
+  RefreshCw,
   Search,
   ShieldAlert,
   ShieldCheck,
@@ -343,11 +346,25 @@ export function LearnerOverview({ user }) {
 export function LearnerProfile({ user: initialUser }) {
   const [data, setData] = useState(null);
   const [currentUser, setCurrentUser] = useState(initialUser);
+  const [externalCerts, setExternalCerts] = useState([]);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isAddCertModalOpen, setIsAddCertModalOpen] = useState(false);
+  const [newCert, setNewCert] = useState({
+    courseName: '',
+    certificateTitle: '',
+    issuingOrganization: 'Moodle LMS',
+    credentialId: '',
+    verificationUrl: '',
+    issueDate: new Date().toISOString().split('T')[0]
+  });
   const [nameInput, setNameInput] = useState('');
   const [nameError, setNameError] = useState('');
   const [saveLoading, setSaveLoading] = useState(false);
   const [feedbackMessage, setFeedbackMessage] = useState({ text: '', type: '' });
+
+  const loadExternalCerts = () => {
+    unwrap(api.get('/external-certificates')).then(setExternalCerts).catch(() => []);
+  };
 
   useEffect(() => {
     unwrap(api.get('/dashboard'))
@@ -358,6 +375,7 @@ export function LearnerProfile({ user: initialUser }) {
         }
       })
       .catch(console.error);
+    loadExternalCerts();
   }, []);
 
   // Handle ESC key to close modal
@@ -622,6 +640,198 @@ export function LearnerProfile({ user: initialUser }) {
             <p className="muted">No certificates earned yet. Complete courses to earn credentials.</p>
           )}
         </section>
+
+        {/* External Certifications Panel (Moodle LMS & Verified External Portals) */}
+        <section className="panel">
+          <div className="panel-heading" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div>
+              <h3>External Certifications ({externalCerts.length})</h3>
+              <small className="muted">Earned via Moodle LMS continuous sync or external verification</small>
+            </div>
+            <button
+              type="button"
+              className="button dark"
+              style={{ height: '32px', fontSize: '11px', padding: '0 12px', gap: '6px' }}
+              onClick={() => setIsAddCertModalOpen(true)}
+            >
+              <Plus size={13} /> Add Certificate
+            </button>
+          </div>
+
+          {externalCerts.length ? (
+            externalCerts.map(c => (
+              <div
+                key={c.id}
+                style={{
+                  padding: '14px 0',
+                  borderBottom: '1px solid var(--line)',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center'
+                }}
+              >
+                <div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <span className="status-badge" style={{ fontSize: '10px', background: '#e0f2fe', color: '#0369a1' }}>
+                      {c.provider || 'MOODLE'}
+                    </span>
+                    <strong>{c.certificateTitle || c.courseName}</strong>
+                  </div>
+                  <small style={{ display: 'block', color: 'var(--muted)', marginTop: '3px' }}>
+                    {c.issuingOrganization} · Credential ID: {c.credentialId || 'N/A'}
+                  </small>
+                </div>
+
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  <span
+                    className="status-badge"
+                    style={{
+                      background: c.verificationStatus === 'VERIFIED' ? '#ecfdf5' : c.verificationStatus === 'REVOKED' ? '#fef2f2' : '#fffbeb',
+                      color: c.verificationStatus === 'VERIFIED' ? '#065f46' : c.verificationStatus === 'REVOKED' ? '#991b1b' : '#92400e',
+                      border: `1px solid ${c.verificationStatus === 'VERIFIED' ? '#a7f3d0' : c.verificationStatus === 'REVOKED' ? '#fecaca' : '#fef3c7'}`,
+                      fontSize: '11px',
+                      fontWeight: 600
+                    }}
+                  >
+                    {c.provider === 'MOODLE' && c.verificationStatus === 'VERIFIED'
+                      ? '✓ AUTO-VERIFIED'
+                      : c.verificationStatus === 'UNVERIFIED'
+                      ? 'PENDING APPROVAL'
+                      : c.verificationStatus}
+                  </span>
+                  {c.verificationUrl && (
+                    <a
+                      className="button dark"
+                      style={{ height: '30px', fontSize: '11px', padding: '0 10px', gap: '4px' }}
+                      href={c.verificationUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      <ExternalLink size={12} /> Verify
+                    </a>
+                  )}
+                </div>
+              </div>
+            ))
+          ) : (
+            <div style={{ padding: '20px 0', textAlign: 'center' }}>
+              <p className="muted" style={{ margin: 0 }}>
+                No external certifications registered yet. Connect your Moodle account or add external credentials using the button above.
+              </p>
+            </div>
+          )}
+        </section>
+
+        {/* Modal: Add External Certificate */}
+        {isAddCertModalOpen && (
+          <div className="modal-backdrop" onClick={() => setIsAddCertModalOpen(false)} role="dialog" aria-modal="true">
+            <div className="modal-card" onClick={e => e.stopPropagation()}>
+              <div className="modal-header">
+                <div>
+                  <h3>Add External Certificate</h3>
+                  <small className="muted">Enter credential details earned from Moodle LMS or an authorized learning portal.</small>
+                </div>
+                <button type="button" className="modal-close" onClick={() => setIsAddCertModalOpen(false)}>
+                  <X size={18} />
+                </button>
+              </div>
+
+              <form onSubmit={async e => {
+                e.preventDefault();
+                if (!newCert.courseName || !newCert.certificateTitle || !newCert.issuingOrganization) return;
+                try {
+                  await unwrap(api.post('/external-certificates', newCert));
+                  setFeedbackMessage({ text: 'External certificate registered successfully. Status: UNVERIFIED pending review.', type: 'success' });
+                  setIsAddCertModalOpen(false);
+                  setNewCert({
+                    courseName: '',
+                    certificateTitle: '',
+                    issuingOrganization: 'Moodle LMS',
+                    credentialId: '',
+                    verificationUrl: '',
+                    issueDate: new Date().toISOString().split('T')[0]
+                  });
+                  loadExternalCerts();
+                } catch (err) {
+                  alert(err.response?.data?.error || 'Failed to submit external certificate');
+                }
+              }}>
+                <div className="modal-body">
+                  <label className="field" style={{ marginTop: 0 }}>
+                    <span>Course Title *</span>
+                    <input
+                      type="text"
+                      required
+                      placeholder="e.g. Enterprise Cloud Architecture with Kubernetes"
+                      value={newCert.courseName}
+                      onChange={e => setNewCert({ ...newCert, courseName: e.target.value })}
+                    />
+                  </label>
+
+                  <label className="field" style={{ marginTop: '10px' }}>
+                    <span>Certificate Title *</span>
+                    <input
+                      type="text"
+                      required
+                      placeholder="e.g. Certified Cloud Architect Specialization"
+                      value={newCert.certificateTitle}
+                      onChange={e => setNewCert({ ...newCert, certificateTitle: e.target.value })}
+                    />
+                  </label>
+
+                  <label className="field" style={{ marginTop: '10px' }}>
+                    <span>Issuing Organization or Portal *</span>
+                    <input
+                      type="text"
+                      required
+                      placeholder="e.g. Moodle LMS, AWS Training, Coursera"
+                      value={newCert.issuingOrganization}
+                      onChange={e => setNewCert({ ...newCert, issuingOrganization: e.target.value })}
+                    />
+                  </label>
+
+                  <label className="field" style={{ marginTop: '10px' }}>
+                    <span>Credential ID (if available)</span>
+                    <input
+                      type="text"
+                      placeholder="e.g. MOODLE-CERT-884920"
+                      value={newCert.credentialId}
+                      onChange={e => setNewCert({ ...newCert, credentialId: e.target.value })}
+                    />
+                  </label>
+
+                  <label className="field" style={{ marginTop: '10px' }}>
+                    <span>Verification URL (if available)</span>
+                    <input
+                      type="url"
+                      placeholder="e.g. http://localhost:8080/mod/customcert/verify.php?code=..."
+                      value={newCert.verificationUrl}
+                      onChange={e => setNewCert({ ...newCert, verificationUrl: e.target.value })}
+                    />
+                  </label>
+
+                  <label className="field" style={{ marginTop: '10px' }}>
+                    <span>Issue Date</span>
+                    <input
+                      type="date"
+                      value={newCert.issueDate}
+                      onChange={e => setNewCert({ ...newCert, issueDate: e.target.value })}
+                    />
+                  </label>
+                </div>
+
+                <div className="modal-footer">
+                  <button type="button" className="button" onClick={() => setIsAddCertModalOpen(false)}>
+                    Cancel
+                  </button>
+                  <button type="submit" className="button primary">
+                    Submit Certificate
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
       </div>
     </>
   );
@@ -1203,21 +1413,61 @@ export function AdminUsers() {
 }
 
 export function AdminCertificates() {
+  const [activeTab, setActiveTab] = useState('internal'); // 'internal' | 'moodle'
   const [certificates, setCertificates] = useState([]);
+  const [externalCerts, setExternalCerts] = useState([]);
+  const [unmatched, setUnmatched] = useState([]);
+  const [syncStatus, setSyncStatus] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [syncing, setSyncing] = useState(false);
   const [search, setSearch] = useState('');
   const [message, setMessage] = useState('');
 
-  const load = () => {
-    unwrap(api.get('/admin/certificates'))
-      .then(setCertificates)
+  const loadData = () => {
+    setLoading(true);
+    Promise.all([
+      unwrap(api.get('/admin/certificates')).catch(() => []),
+      unwrap(api.get('/external-certificates')).catch(() => []),
+      unwrap(api.get('/external-certificates/unmatched')).catch(() => []),
+      unwrap(api.get('/moodle-sync/status')).catch(() => null)
+    ])
+      .then(([internalList, extList, unmatchedList, syncData]) => {
+        setCertificates(internalList || []);
+        setExternalCerts(extList || []);
+        setUnmatched(unmatchedList || []);
+        setSyncStatus(syncData);
+      })
       .catch(console.error)
       .finally(() => setLoading(false));
   };
 
   useEffect(() => {
-    load();
+    loadData();
   }, []);
+
+  const triggerMoodleSync = async () => {
+    setSyncing(true);
+    setMessage('');
+    try {
+      const res = await unwrap(api.post('/moodle-sync/trigger'));
+      setMessage(`Moodle Sync Successful: Synced ${res.result?.syncedCount || 0} external certificate(s).`);
+      loadData();
+    } catch (err) {
+      setMessage(`Sync error: ${err.response?.data?.error || err.message}`);
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const verifyExternal = async (certId, status) => {
+    try {
+      await unwrap(api.patch(`/external-certificates/${certId}/verify`, { status }));
+      setMessage(`External certificate marked as ${status}`);
+      loadData();
+    } catch (err) {
+      setMessage(`Error: ${err.response?.data?.error || err.message}`);
+    }
+  };
 
   const revoke = async certId => {
     const reason = window.prompt('Enter reason for revoking this certificate:');
@@ -1225,7 +1475,7 @@ export function AdminCertificates() {
     try {
       await unwrap(api.post(`/certificates/${certId}/revoke`, { reason }));
       setMessage(`Certificate ${certId} revoked successfully`);
-      load();
+      loadData();
     } catch (err) {
       setMessage(err.response?.data?.message || 'Failed to revoke certificate');
     }
@@ -1234,9 +1484,19 @@ export function AdminCertificates() {
   const filtered = certificates.filter(c => {
     const term = search.toLowerCase();
     return (
-      c.certificateId.toLowerCase().includes(term) ||
-      c.learnerName.toLowerCase().includes(term) ||
-      c.courseName.toLowerCase().includes(term)
+      c.certificateId?.toLowerCase().includes(term) ||
+      c.learnerName?.toLowerCase().includes(term) ||
+      c.courseName?.toLowerCase().includes(term)
+    );
+  });
+
+  const filteredExternal = externalCerts.filter(c => {
+    const term = search.toLowerCase();
+    return (
+      c.certificateTitle?.toLowerCase().includes(term) ||
+      c.courseName?.toLowerCase().includes(term) ||
+      c.credentialId?.toLowerCase().includes(term) ||
+      c.issuingOrganization?.toLowerCase().includes(term)
     );
   });
 
@@ -1244,19 +1504,37 @@ export function AdminCertificates() {
     <>
       <Title
         eyebrow="ADMIN PORTAL"
-        title="Certificate Management"
-        sub="Review all issued certificates, view verification registries, and manage revocations."
+        title="Certificate Management & LMS Sync"
+        sub="Manage internal credentials, monitor continuous Moodle LMS integration, and verify external certificates."
+        action={
+          <button
+            type="button"
+            className="button dark"
+            onClick={triggerMoodleSync}
+            disabled={syncing}
+            style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
+          >
+            <RefreshCw size={15} className={syncing ? 'spin-icon' : ''} />
+            {syncing ? 'Synchronizing...' : 'Sync Moodle Now'}
+          </button>
+        }
       />
 
-      <div className="catalog-tools" style={{ marginBottom: '20px' }}>
-        <div className="searchbox">
-          <Search size={18} />
-          <input
-            placeholder="Search certificate by ID, learner, or course..."
-            value={search}
-            onChange={e => setSearch(e.target.value)}
-          />
-        </div>
+      <div style={{ display: 'flex', gap: '10px', marginBottom: '20px' }}>
+        <button
+          type="button"
+          className={`button ${activeTab === 'internal' ? 'primary' : 'outline'}`}
+          onClick={() => setActiveTab('internal')}
+        >
+          <Award size={15} /> LearnForge Certificates ({certificates.length})
+        </button>
+        <button
+          type="button"
+          className={`button ${activeTab === 'moodle' ? 'primary' : 'outline'}`}
+          onClick={() => setActiveTab('moodle')}
+        >
+          <Globe size={15} /> 🔄 Moodle Continuous Sync ({externalCerts.length})
+        </button>
       </div>
 
       {message && (
@@ -1265,81 +1543,247 @@ export function AdminCertificates() {
         </div>
       )}
 
-      <section className="panel table-panel">
-        <div className="panel-heading">
-          <h3>Issued Certificates ({filtered.length})</h3>
-          <span className="muted">Official credential registry</span>
-        </div>
+      {activeTab === 'moodle' ? (
+        <>
+          {/* Moodle LMS Integration Telemetry Panel */}
+          <div className="stats-grid" style={{ marginBottom: '20px' }}>
+            <Stat
+              label="Integration Status"
+              value={syncStatus?.adapterHealth?.status === 'UP' ? 'CONNECTED (UP)' : 'DEGRADED / STANDBY'}
+              trend={`Moodle at ${syncStatus?.adapterHealth?.sitename || 'localhost:8080'}`}
+              icon={ShieldCheck}
+            />
+            <Stat
+              label="Last Sync Run"
+              value={syncStatus?.sync?.lastSyncTimestamp ? new Date(syncStatus.sync.lastSyncTimestamp).toLocaleTimeString() : 'Recent'}
+              trend={`Status: ${syncStatus?.sync?.lastStatus || 'SUCCESS'}`}
+              icon={RefreshCw}
+            />
+            <Stat
+              label="Synced Certificates"
+              value={externalCerts.length}
+              trend="Authoritative credentials"
+              icon={Award}
+            />
+            <Stat
+              label="Unmatched Queue"
+              value={unmatched.length}
+              trend="Pending identity safety review"
+              icon={AlertTriangle}
+            />
+          </div>
 
-        {loading ? (
-          <div className="loading">Loading certificates...</div>
-        ) : filtered.length ? (
-          filtered.map(cert => (
-            <div className="table-row" key={cert.id}>
-              <div>
-                <strong>{cert.certification}</strong>
-                <small className="muted">
-                  ID: {cert.certificateId} · Recipient: {cert.learnerName}
-                </small>
+          {/* Staged Unmatched Queue Notice */}
+          {unmatched.length > 0 && (
+            <div style={{ background: '#fffbeb', border: '1px solid #fef3c7', padding: '16px', borderRadius: '8px', marginBottom: '20px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px', color: '#92400e', fontWeight: 600 }}>
+                <AlertTriangle size={18} /> Staged Unmatched Learner Identities ({unmatched.length})
               </div>
-
-              <div>
-                <span>Score: {cert.score}%</span>
-                <small className="muted" style={{ display: 'block' }}>
-                  {new Date(cert.issuedDate).toLocaleDateString()}
-                </small>
-              </div>
-
-              <div>
-                <span className={cert.status === 'VALID' ? 'status-badge' : 'status-badge invalid'}>
-                  {cert.status}
-                </span>
-              </div>
-
-              <div style={{ display: 'flex', gap: '8px' }}>
-                <a
-                  className="button dark"
-                  style={{ height: '32px', fontSize: '11px', padding: '0 10px' }}
-                  href={`${api.defaults.baseURL.replace('/api/v1', '')}${cert.pdfUrl}`}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  <Download size={13} /> PDF
-                </a>
-                <Link
-                  className="button dark"
-                  style={{ height: '32px', fontSize: '11px', padding: '0 10px' }}
-                  to={`/verify/${cert.certificateId}`}
-                >
-                  Verify
-                </Link>
-                {cert.status === 'VALID' && (
-                  <button
-                    type="button"
-                    className="button"
-                    style={{
-                      height: '32px',
-                      fontSize: '11px',
-                      padding: '0 10px',
-                      background: '#fff0ee',
-                      color: 'var(--orange)'
-                    }}
-                    onClick={() => revoke(cert.id)}
-                  >
-                    Revoke
-                  </button>
-                )}
+              <p style={{ margin: 0, fontSize: '13px', color: '#78350f' }}>
+                The following Moodle completions could not be matched with a verified LearnForge learner email. Per strict security rules, phantom user accounts were NOT created automatically.
+              </p>
+              <div style={{ marginTop: '10px', display: 'grid', gap: '8px' }}>
+                {unmatched.map(u => (
+                  <div key={u.id} style={{ display: 'flex', justifyContent: 'space-between', background: '#fff', padding: '10px 14px', borderRadius: '6px', fontSize: '12px' }}>
+                    <div>
+                      <strong>{u.course_name}</strong> · Email: <span style={{ fontFamily: 'monospace' }}>{u.raw_email}</span>
+                      <small style={{ display: 'block', color: 'var(--muted)' }}>Credential: {u.credential_id}</small>
+                    </div>
+                    <span className="status-badge" style={{ background: '#fef3c7', color: '#92400e' }}>
+                      PENDING REVIEW
+                    </span>
+                  </div>
+                ))}
               </div>
             </div>
-          ))
-        ) : (
-          <div className="empty-state">
-            <Award size={36} />
-            <h3>No certificates found</h3>
-            <p className="muted">No issued certificates matched your search criteria.</p>
+          )}
+
+          {/* External Certificates List */}
+          <section className="panel table-panel">
+            <div className="panel-heading">
+              <h3>External & Moodle LMS Certificates ({filteredExternal.length})</h3>
+              <span className="muted">W3C & ONEST Compliant External Registry</span>
+            </div>
+
+            {loading ? (
+              <div className="loading">Loading Moodle certificates...</div>
+            ) : filteredExternal.length ? (
+              filteredExternal.map(cert => (
+                <div className="table-row" key={cert.id}>
+                  <div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <span className="status-badge" style={{ fontSize: '10px', background: '#e0f2fe', color: '#0369a1' }}>
+                        {cert.provider || 'MOODLE'}
+                      </span>
+                      <strong>{cert.certificateTitle || cert.courseName}</strong>
+                    </div>
+                    <small className="muted" style={{ display: 'block', marginTop: '3px' }}>
+                      Issuer: {cert.issuingOrganization} · ID: {cert.credentialId || cert.id}
+                    </small>
+                  </div>
+
+                  <div>
+                    <span>Course: {cert.courseName}</span>
+                    <small className="muted" style={{ display: 'block' }}>
+                      Issued: {new Date(cert.issueDate).toLocaleDateString()}
+                    </small>
+                  </div>
+
+                  <div>
+                    <span
+                      className="status-badge"
+                      style={{
+                        background: cert.verificationStatus === 'VERIFIED' ? '#ecfdf5' : cert.verificationStatus === 'REVOKED' ? '#fef2f2' : '#fffbeb',
+                        color: cert.verificationStatus === 'VERIFIED' ? '#065f46' : cert.verificationStatus === 'REVOKED' ? '#991b1b' : '#92400e',
+                        border: `1px solid ${cert.verificationStatus === 'VERIFIED' ? '#a7f3d0' : cert.verificationStatus === 'REVOKED' ? '#fecaca' : '#fef3c7'}`,
+                        fontSize: '11px',
+                        fontWeight: 600
+                      }}
+                    >
+                      {cert.provider === 'MOODLE' && cert.verificationStatus === 'VERIFIED'
+                        ? '✓ AUTO-VERIFIED (MOODLE)'
+                        : cert.verificationStatus === 'UNVERIFIED'
+                        ? 'PENDING APPROVAL'
+                        : cert.verificationStatus}
+                    </span>
+                  </div>
+
+                  <div style={{ display: 'flex', gap: '8px' }}>
+                    {cert.verificationUrl && (
+                      <a
+                        className="button dark"
+                        style={{ height: '32px', fontSize: '11px', padding: '0 10px', gap: '4px' }}
+                        href={cert.verificationUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        <ExternalLink size={12} /> Verify at Source
+                      </a>
+                    )}
+                    {/* Approval only needed when learner manually added external certificate */}
+                    {cert.verificationStatus === 'UNVERIFIED' && (
+                      <button
+                        type="button"
+                        className="button primary"
+                        style={{ height: '32px', fontSize: '11px', padding: '0 10px' }}
+                        onClick={() => verifyExternal(cert.id, 'VERIFIED')}
+                      >
+                        Approve / Verify
+                      </button>
+                    )}
+                    {cert.verificationStatus !== 'REVOKED' && (
+                      <button
+                        type="button"
+                        className="button"
+                        style={{ height: '32px', fontSize: '11px', padding: '0 10px', background: '#fff0ee', color: 'var(--orange)' }}
+                        onClick={() => verifyExternal(cert.id, 'REVOKED')}
+                      >
+                        Revoke
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))
+            ) : (
+              <div className="empty-state">
+                <Globe size={36} />
+                <h3>No external certificates synced yet</h3>
+                <p className="muted">Click "Sync Moodle Now" above to retrieve authoritative certificates from your configured Moodle instance.</p>
+              </div>
+            )}
+          </section>
+        </>
+      ) : (
+        /* Internal LearnForge Certificates Tab */
+        <>
+          <div className="catalog-tools" style={{ marginBottom: '20px' }}>
+            <div className="searchbox">
+              <Search size={18} />
+              <input
+                placeholder="Search certificate by ID, learner, or course..."
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+              />
+            </div>
           </div>
-        )}
-      </section>
+
+          <section className="panel table-panel">
+            <div className="panel-heading">
+              <h3>Issued Certificates ({filtered.length})</h3>
+              <span className="muted">LearnForge internal credential registry</span>
+            </div>
+
+            {loading ? (
+              <div className="loading">Loading certificates...</div>
+            ) : filtered.length ? (
+              filtered.map(cert => (
+                <div className="table-row" key={cert.id}>
+                  <div>
+                    <strong>{cert.certification}</strong>
+                    <small className="muted" style={{ display: 'block' }}>
+                      ID: {cert.certificateId} · Recipient: {cert.learnerName}
+                    </small>
+                  </div>
+
+                  <div>
+                    <span>Score: {cert.score}%</span>
+                    <small className="muted" style={{ display: 'block' }}>
+                      {new Date(cert.issuedDate).toLocaleDateString()}
+                    </small>
+                  </div>
+
+                  <div>
+                    <span className={cert.status === 'VALID' ? 'status-badge' : 'status-badge invalid'}>
+                      {cert.status}
+                    </span>
+                  </div>
+
+                  <div style={{ display: 'flex', gap: '8px' }}>
+                    <a
+                      className="button dark"
+                      style={{ height: '32px', fontSize: '11px', padding: '0 10px' }}
+                      href={`${api.defaults.baseURL.replace('/api/v1', '')}${cert.pdfUrl}`}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      <Download size={13} /> PDF
+                    </a>
+                    <Link
+                      className="button dark"
+                      style={{ height: '32px', fontSize: '11px', padding: '0 10px' }}
+                      to={`/verify/${cert.certificateId}`}
+                    >
+                      Verify
+                    </Link>
+                    {cert.status === 'VALID' && (
+                      <button
+                        type="button"
+                        className="button"
+                        style={{
+                          height: '32px',
+                          fontSize: '11px',
+                          padding: '0 10px',
+                          background: '#fff0ee',
+                          color: 'var(--orange)'
+                        }}
+                        onClick={() => revoke(cert.id)}
+                      >
+                        Revoke
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))
+            ) : (
+              <div className="empty-state">
+                <Award size={36} />
+                <h3>No certificates found</h3>
+                <p className="muted">No issued certificates matched your search criteria.</p>
+              </div>
+            )}
+          </section>
+        </>
+      )}
     </>
   );
 }
