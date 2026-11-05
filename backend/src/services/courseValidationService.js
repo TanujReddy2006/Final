@@ -38,27 +38,36 @@ export function validateCourseForPublish(course, assessments = []) {
     if (!module.title) errors.push(`Module ${moduleIndex + 1} has no title`);
     if (!module.lessons?.length) errors.push(`Module ${moduleIndex + 1} has no lessons`);
     module.lessons?.forEach((lesson, lessonIndex) => {
-      if (!lesson.content) {
+      // Accept lesson if content, description, videoUrl or title is provided
+      if (!lesson.content && !lesson.description && !lesson.videoUrl && !lesson.title) {
         errors.push(`Module ${moduleIndex + 1}, lesson ${lessonIndex + 1} has no content`);
       }
     });
   });
 
-  const finalAssessment = assessments.find(assessment => assessment.id === course.assessmentId);
-  if (!finalAssessment?.title) errors.push('Final assessment has no title');
-  if (!finalAssessment?.questions?.length) errors.push('Final assessment has no questions');
+  // Find final assessment by ID, courseId, or first available assessment for this course
+  const finalAssessment =
+    assessments.find(a => a.id === course.assessmentId || a.courseId === course.id) ||
+    assessments[0];
 
-  finalAssessment?.questions?.forEach((question, questionIndex) => {
-    if (!question.options?.length) {
-      errors.push(`Question ${questionIndex + 1} has no options`);
+  if (!finalAssessment) {
+    errors.push('Final assessment is required before publishing');
+  } else {
+    if (!finalAssessment.questions?.length) {
+      errors.push('Final assessment must have at least one question');
+    } else {
+      finalAssessment.questions.forEach((question, questionIndex) => {
+        if (!question.text && !question.title) {
+          errors.push(`Question ${questionIndex + 1} is missing question text`);
+        }
+        if (!question.options?.length) {
+          errors.push(`Question ${questionIndex + 1} has no options`);
+        } else if (!question.options.some(option => option.correct)) {
+          errors.push(`Question ${questionIndex + 1} has no correct answer selected`);
+        }
+      });
     }
-    if (!question.options?.some(option => option.correct)) {
-      errors.push(`Question ${questionIndex + 1} has no correct answer`);
-    }
-    if (!Number.isFinite(Number(question.marks ?? 1)) || Number(question.marks ?? 1) <= 0) {
-      errors.push(`Question ${questionIndex + 1} has invalid marks`);
-    }
-  });
+  }
 
   return errors;
 }

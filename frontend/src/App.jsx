@@ -34,6 +34,7 @@ import {
   LearnerOverview,
   LearnerProfile
 } from './rolePortals.jsx';
+import { FinalAssessment } from './portalFeatures.jsx';
 import { LandingPage } from './LandingPage.jsx';
 
 const demo = {
@@ -909,7 +910,7 @@ function Routes({ user }) {
   if (path.startsWith('/courses/')) return <Course />;
   if (path === '/my-courses') return <MyCourses />;
   if (path.startsWith('/my-courses/')) return <LearnerPlayer />;
-  if (path.startsWith('/assessments/')) return <FinalAssessment />;
+  if (path.startsWith('/assessments/') || path.startsWith('/assignments/') || path === '/assessments' || path === '/assignments') return <FinalAssessment />;
   if (path === '/certificates') return <Certificates />;
   if (path === '/profile') return <LearnerProfile user={user} />;
   if (path === '/hr/verify') return <HRVerify />;

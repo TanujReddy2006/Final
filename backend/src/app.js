@@ -1769,7 +1769,8 @@ app.patch('/api/v1/assessments/:id', requireAuth, allow('COMPANY'), async (req, 
     });
   }
 
-  const title = req.body.title ?? assessment.title;
+  const title = req.body.title || req.body.assessmentTitle || assessment.title;
+  const description = req.body.description || req.body.assessmentDescription || assessment.description;
   const passingScore = Number(req.body.passingScore ?? assessment.passingScore);
   const maxAttempts = Number(req.body.maxAttempts ?? assessment.maxAttempts);
   const questions = req.body.questions
